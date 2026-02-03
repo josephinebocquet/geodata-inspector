@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Geodata Inspector</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f7fa; color: #333; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 2rem 1rem; }
+        h1 { text-align: center; margin-bottom: 2rem; color: #1a1a2e; }
+
+        /* Upload area */
+        .upload-area {
+            border: 2px dashed #b0bec5; border-radius: 8px; padding: 2.5rem;
+            text-align: center; background: #fff; cursor: pointer;
+            transition: border-color 0.2s, background 0.2s;
+            max-width: 600px; margin: 0 auto;
+        }
+        .upload-area.dragover { border-color: #1976d2; background: #e3f2fd; }
+        .upload-area p { margin-bottom: 1rem; color: #607d8b; }
+        .upload-area .formats { font-size: 0.85rem; color: #90a4ae; }
+        .upload-area input[type="file"] { display: none; }
+        .upload-btn {
+            display: inline-block; padding: 0.6rem 1.5rem; background: #1976d2;
+            color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem;
+        }
+        .upload-btn:hover { background: #1565c0; }
+        .upload-btn:disabled { background: #90a4ae; cursor: not-allowed; }
+        .clear-btn {
+            display: none;
+            padding: 0.4rem 1rem;
+            background: #ef5350;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            margin-left: 0.5rem;
+        }
+        .clear-btn:hover { background: #c62828; }
+
+        /* File info */
+        .file-info { margin-top: 1rem; font-size: 0.9rem; color: #455a64; }
+
+        /* Status */
+        .status { text-align: center; margin: 1.5rem 0; font-size: 0.95rem; }
+        .status.error { color: #c62828; }
+        .status.loading { color: #1976d2; }
+        .status.warning { color: #f57c00; background: #fff3e0; padding: 0.8rem; border-radius: 4px; }
+
+        /* Logs */
+        .logs-section { margin: 1.5rem auto; max-width: 600px; }
+        .logs-header {
+            display: flex; align-items: center; justify-content: center;
+            gap: 0.5rem; cursor: pointer; user-select: none;
+        }
+        .logs-toggle {
+            font-size: 0.85rem; color: #607d8b; padding: 0.3rem 0.8rem;
+            border: 1px solid #b0bec5; border-radius: 4px; background: #fff;
+            transition: background 0.2s; cursor: pointer;
+        }
+        .logs-toggle:hover { background: #f5f7fa; }
+        .logs-content {
+            margin-top: 1rem; background: #263238; color: #cfd8dc;
+            border-radius: 8px; padding: 1rem; font-family: 'Courier New', monospace;
+            font-size: 0.85rem; max-height: 300px; overflow-y: auto;
+            display: none;
+        }
+        .logs-content.show { display: block; }
+        .log-entry { margin-bottom: 0.5rem; }
+        .log-entry.error { color: #ef5350; }
+        .log-entry.success { color: #66bb6a; }
+
+        /* Main content area - side by side layout */
+        .content-wrapper {
+            display: flex;
+            gap: 1.5rem;
+            margin-top: 2rem;
+            align-items: flex-start;
+        }
+
+        /* Results table - left side */
+        .results {
+            flex: 3;
+            min-width: 0;
+            display: none;
+        }
+        .results h2 { margin-bottom: 1rem; color: #1a1a2e; }
+        .results table {
+            width: 100%; border-collapse: collapse; background: #fff;
+            border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .results th, .results td {
+            text-align: left; padding: 0.75rem 1rem; border-bottom: 1px solid #eceff1;
+        }
+        .results th { background: #263238; color: #fff; width: 40%; font-weight: 500; }
+        .results td { word-break: break-word; font-size: 0.9rem; }
+        .results tr:last-child th, .results tr:last-child td { border-bottom: none; }
+        .nested-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+            margin: 0.3rem 0;
+            table-layout: fixed;
+        }
+        .nested-table th, .nested-table td {
+            padding: 0.25rem 0.4rem;
+            border: 1px solid #cfd8dc;
+            text-align: left;
+        }
+        .nested-table th {
+            background: #455a64;
+            color: #fff;
+            font-weight: 500;
+            font-size: 0.75rem;
+            text-align: center;
+        }
+        .nested-table tr:nth-child(even) {
+            background: #f5f7fa;
+        }
+        .nested-table tr:hover {
+            background: #e3f2fd;
+        }
+        .nested-table td {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        /* Colonne column */
+        .nested-table th:nth-child(1),
+        .nested-table td:nth-child(1) {
+            width: 28%;
+            word-wrap: break-word;
+            white-space: normal;
+        }
+        /* Exemple column - same as Colonne */
+        .nested-table th:nth-child(2),
+        .nested-table td:nth-child(2) {
+            width: 28%;
+            word-wrap: break-word;
+            white-space: normal;
+        }
+        /* Type column */
+        .nested-table th:nth-child(3),
+        .nested-table td:nth-child(3) {
+            width: 12%;
+        }
+        /* Valeurs manquantes column - fit content */
+        .nested-table th:nth-child(4),
+        .nested-table td:nth-child(4) {
+            width: auto;
+            min-width: 60px;
+            text-align: center;
+        }
+
+        /* Map - right side */
+        .map-container {
+            flex: 2;
+            min-width: 0;
+            display: none;
+        }
+        .map-container h2 { margin-bottom: 1rem; color: #1a1a2e; }
+        #map {
+            height: 600px;
+            width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .no-map-data {
+            height: 600px;
+            width: 100%;
+            border-radius: 8px;
+            background: #eceff1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #607d8b;
+            font-size: 1.1rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        /* Responsive: stack on smaller screens */
+        @media (max-width: 900px) {
+            .content-wrapper {
+                flex-direction: column;
+            }
+            .results, .map-container {
+                width: 100%;
+            }
+            #map {
+                height: 400px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Geodata Inspector</h1>
+
+        <div class="upload-area" id="dropZone">
+            <p>Glissez-d&eacute;posez un fichier ici ou</p>
+            <button class="upload-btn" id="browseBtn">Parcourir</button>
+            <button class="clear-btn" id="clearBtn">Effacer</button>
+            <input type="file" id="fileInput"
+                   accept=".csv,.txt,.xlsx,.geojson,.json,.shp,.gpkg,.zip">
+            <p class="formats">Formats : CSV, TXT, XLSX, GeoJSON, JSON, SHP, GPKG, ZIP</p>
+            <div class="file-info" id="fileInfo"></div>
+        </div>
+
+        <div class="status" id="status"></div>
+
+        <div class="logs-section">
+            <div class="logs-header">
+                <button class="logs-toggle" id="logsToggle">Afficher les logs</button>
+            </div>
+            <div class="logs-content" id="logsContent"></div>
+        </div>
+
+        <div class="content-wrapper">
+            <div class="results" id="results">
+                <h2>Résultats</h2>
+                <table>
+                    <tbody id="resultsBody"></tbody>
+                </table>
+            </div>
+
+            <div class="map-container" id="mapContainer">
+                <h2>Carte</h2>
+                <div id="map"></div>
+                <div id="noMapData" class="no-map-data" style="display: none;">
+                    Pas de données géographiques
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const browseBtn = document.getElementById('browseBtn');
+        const fileInfo = document.getElementById('fileInfo');
+        const status = document.getElementById('status');
+        const results = document.getElementById('results');
+        const resultsBody = document.getElementById('resultsBody');
+        const mapContainer = document.getElementById('mapContainer');
+        const mapDiv = document.getElementById('map');
+        const noMapData = document.getElementById('noMapData');
+        const logsToggle = document.getElementById('logsToggle');
+        const logsContent = document.getElementById('logsContent');
+        const clearBtn = document.getElementById('clearBtn');
+
+        let map = null;
+
+        // Clear button functionality
+        clearBtn.addEventListener('click', () => {
+            // Reset file input
+            fileInput.value = '';
+            fileInfo.textContent = '';
+
+            // Hide results and map
+            results.style.display = 'none';
+            mapContainer.style.display = 'none';
+
+            // Clear map if exists
+            if (map) {
+                map.remove();
+                map = null;
+            }
+
+            // Reset status
+            status.className = 'status';
+            status.textContent = '';
+
+            // Clear logs
+            clearLogs();
+            logsContent.classList.remove('show');
+            logsToggle.textContent = 'Afficher les logs';
+
+            // Hide clear button
+            clearBtn.style.display = 'none';
+
+            console.log('[Geodata Inspector] Interface cleared');
+        });
+
+        // Logs functionality
+        logsToggle.addEventListener('click', () => {
+            logsContent.classList.toggle('show');
+            logsToggle.textContent = logsContent.classList.contains('show')
+                ? 'Masquer les logs'
+                : 'Afficher les logs';
+        });
+
+        function addLog(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            logsContent.appendChild(entry);
+            logsContent.scrollTop = logsContent.scrollHeight;
+            // Also log to browser console
+            console.log(`[Geodata Inspector] ${message}`);
+        }
+
+        function clearLogs() {
+            logsContent.innerHTML = '';
+        }
+
+        browseBtn.addEventListener('click', () => fileInput.click());
+
+        dropZone.addEventListener('dragover', e => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+        dropZone.addEventListener('drop', e => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                fileInput.files = e.dataTransfer.files;
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) handleFile(fileInput.files[0]);
+        });
+
+        function handleFile(file) {
+            const sizeMB = file.size / (1024 * 1024);
+            const sizeKB = file.size / 1024;
+            fileInfo.textContent = `${file.name} (${sizeKB.toFixed(1)} Ko)`;
+
+            // Check if it's a large file that will take time
+            const isExcel = file.name.toLowerCase().endsWith('.xlsx');
+            const isLargeFile = (isExcel && sizeMB > 10) || sizeMB > 50;
+
+            uploadFile(file, isLargeFile, sizeMB);
+        }
+
+        async function uploadFile(file, isLargeFile = false, sizeMB = 0) {
+            clearLogs();
+            // Auto-expand logs
+            if (!logsContent.classList.contains('show')) {
+                logsContent.classList.add('show');
+                logsToggle.textContent = 'Masquer les logs';
+            }
+
+            // Show appropriate status message
+            if (isLargeFile) {
+                status.className = 'status warning';
+                status.textContent = `Fichier volumineux (${sizeMB.toFixed(1)} MB) - analyse en cours, peut prendre jusqu'à une minute...`;
+            } else {
+                status.className = 'status loading';
+                status.textContent = 'Analyse en cours...';
+            }
+            results.style.display = 'none';
+            mapContainer.style.display = 'none';
+            mapDiv.style.display = 'block';
+            noMapData.style.display = 'none';
+            browseBtn.disabled = true;
+
+            addLog(`Fichier sélectionné: ${file.name} (${(file.size / 1024).toFixed(1)} Ko)`);
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                addLog('Envoi du fichier au serveur...');
+                const resp = await fetch('/upload', { method: 'POST', body: formData });
+                addLog('Réception de la réponse...');
+
+                const data = await resp.json();
+
+                if (data.error) {
+                    status.className = 'status error';
+                    status.textContent = data.error;
+                    addLog(`Erreur: ${data.error}`, 'error');
+                } else {
+                    status.className = 'status';
+                    status.textContent = '';
+
+                    // Display backend logs in UI and console
+                    if (data.logs && data.logs.length > 0) {
+                        data.logs.forEach(log => addLog(log, 'info'));
+                    }
+
+                    // Display warning if present
+                    if (data.warning) {
+                        addLog(data.warning, 'error');
+                    }
+
+                    addLog('Analyse terminée avec succès', 'success');
+                    // summary is an array of [key, value] pairs - find specific values
+                    const nbLignes = data.summary.find(([k]) => k === 'Nb lignes')?.[1] ?? 'N/A';
+                    const nbColonnes = data.summary.find(([k]) => k === 'Nb colonnes')?.[1] ?? 'N/A';
+                    addLog(`Lignes: ${nbLignes}, Colonnes: ${nbColonnes}`);
+
+                    displayResults(data.summary);
+
+                    // Show clear button after successful upload
+                    clearBtn.style.display = 'inline-block';
+
+                    if (data.map) {
+                        addLog('Génération de la carte...', 'success');
+                        displayMap(data.map);
+                    } else {
+                        // Show "no geographic data" message
+                        mapContainer.style.display = 'block';
+                        mapDiv.style.display = 'none';
+                        noMapData.style.display = 'flex';
+                        addLog('Pas de données géographiques pour la carte');
+                    }
+                }
+            } catch (err) {
+                status.className = 'status error';
+                status.textContent = 'Erreur de connexion : ' + err.message;
+                addLog(`Erreur de connexion: ${err.message}`, 'error');
+            } finally {
+                browseBtn.disabled = false;
+            }
+        }
+
+        function formatValue(val, key = '') {
+            if (val === null || val === undefined) return '<em>N/A</em>';
+
+            // Check if it's a nested table structure
+            if (typeof val === 'object' && val._table && val.data) {
+                return renderNestedTable(val.data);
+            }
+
+            if (typeof val === 'object') return JSON.stringify(val, null, 2);
+
+            return String(val);
+        }
+
+        function renderNestedTable(data) {
+            if (!data || data.length === 0) return '<em>Aucune donnée</em>';
+
+            // Get column headers from first row
+            const headers = Object.keys(data[0]);
+
+            let html = '<table class="nested-table">';
+            html += '<thead><tr>';
+            headers.forEach(h => {
+                // Add line break for "Valeurs manquantes"
+                let displayHeader = h;
+                if (h === 'Valeurs manquantes') {
+                    displayHeader = 'Valeurs<br>manquantes';
+                }
+                html += `<th>${displayHeader}</th>`;
+            });
+            html += '</tr></thead>';
+
+            html += '<tbody>';
+            data.forEach(row => {
+                html += '<tr>';
+                headers.forEach(h => {
+                    const cellVal = row[h] !== null && row[h] !== undefined ? row[h] : 'N/A';
+                    html += `<td>${cellVal}</td>`;
+                });
+                html += '</tr>';
+            });
+            html += '</tbody></table>';
+
+            return html;
+        }
+
+        function displayResults(summary) {
+            resultsBody.innerHTML = '';
+            // summary is now an array of [key, value] pairs to preserve order
+            for (const [key, value] of summary) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<th>${key}</th><td>${formatValue(value, key)}</td>`;
+                resultsBody.appendChild(tr);
+            }
+            results.style.display = 'block';
+        }
+
+        function displayMap(mapData) {
+            // Clear existing map if any
+            if (map) {
+                map.remove();
+            }
+
+            // Show map, hide "no data" message
+            mapDiv.style.display = 'block';
+            noMapData.style.display = 'none';
+
+            // Create new map
+            map = L.map('map').setView(mapData.center, 6);
+
+            // Add OpenStreetMap tiles
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(map);
+
+            // Add GeoJSON data
+            if (mapData.geojson) {
+                L.geoJSON(mapData.geojson, {
+                    style: {
+                        color: '#1976d2',
+                        weight: 2,
+                        opacity: 0.7,
+                        fillOpacity: 0.3
+                    },
+                    pointToLayer: function (feature, latlng) {
+                        return L.circleMarker(latlng, {
+                            radius: 5,
+                            fillColor: '#1976d2',
+                            color: '#fff',
+                            weight: 1,
+                            opacity: 1,
+                            fillOpacity: 0.7
+                        });
+                    }
+                }).addTo(map);
+            }
+
+            // Show the container first
+            mapContainer.style.display = 'block';
+
+            // Invalidate size after container is visible (required for Leaflet)
+            setTimeout(() => {
+                map.invalidateSize();
+                // Fit bounds if available
+                if (mapData.bounds) {
+                    map.fitBounds(mapData.bounds, { padding: [20, 20] });
+                }
+            }, 100);
+        }
+    </script>
+</body>
+</html>

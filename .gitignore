@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Data files (comment out if you want to include small test data)
+# data/
+*.csv
+*.xlsx
+*.geojson
+*.shp
+*.shx
+*.dbf
+*.prj
+*.gpkg
+
+# Output files
+inspection_summary*.csv
+inspection_summary*.xlsx
+metadata_output.*
+directory_metadata.*
+quick_export.*
+test_output.*
+
+# DuckDB
+*.duckdb
+*.db
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
