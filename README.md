@@ -130,85 +130,6 @@ geodata_inspector/
 └── LIBRARY_SUMMARY.md           # 🆕 Library quick start guide
 ```
 
-## Key Improvements Over Original
-
-1. **LineString Detection**: Properly detects road network data with start/end coordinates (xD/yD → xF/yF)
-2. **DuckDB Spatial**: Uses `ST_MakeLine`, `ST_Point`, `ST_Transform` for native geometry processing
-3. **French Data Support**: Handles comma decimal separators (e.g., "511656,78")
-4. **Performance**:
-   - CSV reading: 0.1-0.5s for files with thousands of rows
-   - Geometry processing: 0.2-0.4s for LineString creation and transformation
-   - Metropolitan France filtering: Automatic filtering of overseas territories
-
-## Examples
-
-### TMJA Road Network Files
-
-The inspector correctly handles French road traffic data (TMJA = Trafic Moyen Journalier Annuel):
-
-```
-File: tmja-2019.csv
-- Detected: LineString geometry from xD/yD → xF/yF columns
-- CRS: EPSG:2154 (Lambert 93)
-- Rows: 4,695 road segments
-- Processing time: 0.24s
-- Complexity: 2.0 (straight-line segments)
-```
-
-### Point Data (Monitoring Stations)
-
-```
-File: result.csv
-- Detected: Point geometry from x_wgs84/y_wgs84
-- CRS: EPSG:4326 → EPSG:2154
-- Rows: 36,771 points
-- Processing time: 0.51s
-```
-
-### Polygon Data (Administrative Regions)
-
-```
-File: irsn_radon_metropole.shp
-- Detected: Native Polygon geometry
-- CRS: EPSG:4326 → EPSG:2154
-- Processing time: Native DuckDB spatial processing
-```
-
-## Technical Details
-
-### Geometry Detection Logic
-
-The `get_geo_columns_duckdb()` function detects geometry through:
-
-1. **Column Name Patterns**:
-   - `lat/latitude`, `lon/longitude` → Point
-   - `xD/yD` + `xF/yF` → LineString (start/end coordinates)
-   - `x/y` pairs → Point
-   - `geometry`, `geom`, `shape` → WKT/GeoJSON
-
-2. **Content Analysis**:
-   - Samples first row to identify WKT, GeoJSON, or geopoint format
-   - Checks for start/end patterns (d/debut/start, f/fin/end)
-
-3. **Suffix Matching**:
-   - Pairs coordinates by suffix: `xD` with `yD`, `xF` with `yF`
-   - Ensures consistent coordinate pairing
-
-### DuckDB Spatial Functions
-
-- `ST_Point(x, y)`: Create point geometries
-- `ST_MakeLine(point1, point2)`: Create LineString from two points
-- `ST_Transform(geom, from_crs, to_crs)`: Reproject geometries
-- `ST_Centroid(geom)`: Get geometry center for filtering
-- `ST_Union_Agg(geom)`: Merge geometries for extent calculation
-
-### Performance Optimization
-
-- **Smart Sampling**: For large Excel files (>5000 rows), samples unique geometries
-- **Duplicate Pre-filtering**: Detects duplicates before full processing
-- **Lazy Projection**: Only reprojects data when CRS transformation needed
-- **Vectorized Operations**: Uses DuckDB's columnar processing for coordinates
-
 ## Troubleshooting
 
 ### DuckDB Spatial Extension
@@ -219,15 +140,6 @@ If you get "spatial extension not found":
 import duckdb
 conn = duckdb.connect(':memory:')
 conn.execute("INSTALL spatial; LOAD spatial;")
-```
-
-### Memory Issues
-
-For very large files (>100MB), increase sampling:
-
-```python
-# In inspect_geodata_duckdb.py, modify:
-sample_size = 10000  # Reduce from default 5000
 ```
 
 ### CRS Detection
@@ -252,3 +164,4 @@ This project uses:
 ## Credits
 
 Developed for the GeoCancer project for efficient geodata quality assessment in cancer research data analysis.
+
