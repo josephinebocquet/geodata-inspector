@@ -1231,8 +1231,9 @@ def inspect_geospatial_duckdb(filepath, gdf_metro):
 
         # Create sample GeoDataFrame for map display (using GeoPandas for simplicity)
         try:
-            sample_wkt = conn.execute(f"""
-                SELECT ST_AsText("{geom_col}") as wkt FROM geo_data
+            # Use geo_processed table which has transformed geometries in EPSG:2154
+            sample_wkt = conn.execute("""
+                SELECT ST_AsText(geom) as wkt FROM geo_processed
                 USING SAMPLE 1000
             """).fetchdf()
 
