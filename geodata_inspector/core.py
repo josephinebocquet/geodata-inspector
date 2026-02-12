@@ -28,11 +28,8 @@ import re
 import json
 
 # Import spatial metrics (reuse existing)
-from spatial_metrics import (
-    taux_de_remplissage,
-    complexite_moyenne,
-    pourcentage_geometries_dupliquees,
-)
+from . import spatial 
+from .spatial import taux_de_remplissage
 
 # ============================================================================
 # CONFIGURATION & STATE
@@ -999,7 +996,7 @@ def inspect_csv_duckdb(filepath, gdf_metro):
     print(f"\n{filepath} done\n")
 
 
-def inspect_excel_duckdb(filepath, gdf_metro, sample_size=5000):
+def inspect_excel(filepath, gdf_metro, sample_size=5000):
     """
     Inspect Excel file using original optimized reading + DuckDB spatial for geometry.
 

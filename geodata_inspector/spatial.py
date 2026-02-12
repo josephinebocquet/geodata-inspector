@@ -72,7 +72,6 @@ from shapely.geometry import box
 
 #     return {'Couverture territoriale (%)': round(coverage_pct, 2)}
 
-
 def taux_de_remplissage(gdf, gdf_reference, crs_metric=2154):
     """
     Calculate the fill rate: ratio of actual data coverage vs bounding box.

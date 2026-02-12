@@ -28,3 +28,4 @@ esda>=2.5.0            # Exploratory spatial data analysis
 
 # Note: DuckDB spatial extension is installed automatically on first use
 # via: conn.execute("INSTALL spatial; LOAD spatial;")
+python-calamine>=0.1.0

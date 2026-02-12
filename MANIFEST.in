@@ -1,0 +1,6 @@
+include README.md
+include LICENSE
+include requirements.txt
+recursive-include geodata_inspector/data *.geojson
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]

@@ -34,7 +34,9 @@ import pandas as pd
 import geopandas as gpd
 
 # Import the DuckDB inspector
-import inspect_geodata_duckdb as inspector
+from . import core as inspector
+from dataclasses import dataclass
+from typing import Dict, Any, Optional
 
 
 class MetadataResult:
@@ -473,7 +475,15 @@ class MetadataExtractor:
             stats["error_types"] = error_types
 
         return stats
-
+        
+@dataclass
+class ExtractionResult:
+    """Result of metadata extraction"""
+    filename: str
+    success: bool
+    metadata: Dict[str, Any]
+    processing_time: float
+    error_message: Optional[str] = None
 
 # Convenience functions for quick usage
 def extract_metadata(filepath: str, reference_file: Optional[str] = None) -> Dict[str, Any]:
@@ -524,48 +534,25 @@ def extract_metadata_batch(filepaths: List[str],
 # Example usage
 if __name__ == "__main__":
     import sys
-
+    import os
+    
     print("""
 Geodata Metadata Extraction Library
-====================================
-
-Example usage:
-
-    from geodata_metadata import MetadataExtractor
-
-    # Initialize
-    extractor = MetadataExtractor(reference_file="data/regions.geojson")
-
-    # Extract from single file
-    result = extractor.extract("data/file.csv")
-    if result.success:
-        print(result.metadata)
-
-    # Batch processing
-    results = extractor.extract_batch(["file1.csv", "file2.geojson"])
-
-    # Export to various formats
-    extractor.to_csv(results, "metadata.csv")
-    extractor.to_json(results, "metadata.json")
-    extractor.to_excel(results, "metadata.xlsx")
-
-    # Get summary statistics
-    stats = extractor.get_summary_stats(results)
-    print(stats)
-    """)
-
+====================================""")
+    
     if len(sys.argv) > 1:
         # Quick test with provided file
         filepath = sys.argv[1]
         reference = "data/regions.geojson" if os.path.exists("data/regions.geojson") else None
-
         print(f"\nTesting with: {filepath}\n")
-        result = extract_metadata(filepath, reference_file=reference)
-
-        if result:
+        
+        extractor = MetadataExtractor(reference_file=reference)
+        result = extractor.extract(filepath)
+        
+        if result.success:
             print("Metadata extracted successfully:")
-            for key, value in result.items():
+            for key, value in result.metadata.items():
                 if key != "Colonnes":
                     print(f"  {key}: {value}")
         else:
-            print("Failed to extract metadata")
+            print(f"Failed to extract metadata: {result.error_message}")
