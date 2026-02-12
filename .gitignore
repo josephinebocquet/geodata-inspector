@@ -64,5 +64,5 @@ test_output.*
 # Logs
 *.log
 
-# OS
-Thumbs.db
+add_extraction_result.py
+diagnose_excel.py
