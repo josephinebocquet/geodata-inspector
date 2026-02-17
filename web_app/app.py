@@ -13,18 +13,20 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 
+# Ajoute la racine du repo au path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # Ensure this directory is on the path so imports resolve
-sys.path.insert(0, os.path.dirname(__file__))
+# sys.path.insert(0, os.path.dirname(__file__))
 
 # Use DuckDB-optimized inspector for better performance
-import inspect_geodata_duckdb as inspector
+import geodata_inspector.core as inspector
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB max upload
 app.config["JSON_SORT_KEYS"] = False  # Preserve column order in JSON responses
 
 # Pre-load the reference geodataframe once at startup
-REFERENCE_PATH = os.path.join(os.path.dirname(__file__), "data", "regions.geojson")
+REFERENCE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "reference_file", "regions.geojson")
 gdf_reference = gpd.read_file(REFERENCE_PATH).to_crs(epsg=2154)
 
 ALLOWED_EXTENSIONS = {".csv", ".txt", ".xlsx", ".geojson", ".json", ".shp", ".gpkg", ".zip"}
@@ -191,8 +193,13 @@ def upload():
                     "error": "ZIP archive does not contain a supported data file (.shp, .geojson, .csv, .xlsx, .gpkg)."
                 }), 400
 
-        # Clear global summary list and last GeoDataFrame
-        inspector.summary_rows.clear()
+        # # Clear global summary list and last GeoDataFrame
+        # if inspector.summary_rows is not None : 
+        #     inspector.summary_rows.clear()
+        # if inspector.last_gdf is None : 
+        #     inspector.last_gdf = None
+        if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
+            inspector.summary_rows.clear()
         inspector.last_gdf = None
 
         # Capture stdout from inspection process
@@ -272,6 +279,6 @@ if __name__ == "__main__":
     print("  - Automatic CRS detection and transformation")
     print("=" * 70)
     print("\nStarting web server...")
-    print("Open http://127.0.0.1:5000 in your browser")
-    print("=" * 70)
-    app.run(debug=True, host="127.0.0.1", port=5000)
+    print("Open http://127.0.0.1:5050 in your browser")
+    print("=" * 70) #http://10.149.201.62/ #127.0.0.1
+    app.run(debug=True, host="10.149.201.62", port=5050)
