@@ -3,7 +3,7 @@
 Test geodata-inspector on all files in a directory
 
 Usage:
-    python test_all_files.py /data/2024_jbt_work/collaboration_Noa/data/
+    python test_all_files.py /data/2024_jbt_work/collaboration_Noa/data/ /data/2024_jbt_work/restart_library/geodata-inspector/reference_file/regions.geojson
 """
 
 import sys
@@ -21,6 +21,7 @@ except ImportError as e:
     print("Make sure you've run: pip install -e .")
     sys.exit(1)
 
+reference_file="/data/2024_jbt_work/restart_library/geodata-inspector/reference_file/regions.geojson"
 
 def find_all_data_files(directory, extensions=None):
     """
@@ -52,7 +53,7 @@ def find_all_data_files(directory, extensions=None):
     return sorted(files)
 
 
-def test_all_files(data_dir, reference_file=None, output_dir=None):
+def test_all_files(data_dir, reference_file="/data/2024_jbt_work/restart_library/geodata-inspector/reference_file/regions.geojson", output_dir=None):
     """
     Test geodata-inspector on all files in a directory
     
@@ -171,20 +172,10 @@ def test_all_files(data_dir, reference_file=None, output_dir=None):
     
     try:
         # CSV
-        csv_file = output_path / f"geodata_inspection_{timestamp}.csv"
+        csv_file = output_path / f"geodata_inspection_for all_files.csv"
         extractor.to_csv(results, str(csv_file))
         print(f"✓ CSV exported: {csv_file}")
-        
-        # Excel
-        xlsx_file = output_path / f"geodata_inspection_{timestamp}.xlsx"
-        extractor.to_excel(results, str(xlsx_file))
-        print(f"✓ Excel exported: {xlsx_file}")
-        
-        # JSON
-        json_file = output_path / f"geodata_inspection_{timestamp}.json"
-        extractor.to_json(results, str(json_file))
-        print(f"✓ JSON exported: {json_file}")
-        
+
     except Exception as e:
         print(f"⚠ Error exporting results: {e}")
         traceback.print_exc()
@@ -202,9 +193,6 @@ def main():
     # Parse arguments
     if len(sys.argv) < 2:
         print("Usage: python test_all_files.py <data_directory> [reference_file] [output_directory]")
-        print("\nExample:")
-        print("  python test_all_files.py /data/2024_jbt_work/collaboration_Noa/data/")
-        print("  python test_all_files.py /data/files/ data/regions.geojson ./results/")
         sys.exit(1)
     
     data_dir = sys.argv[1]

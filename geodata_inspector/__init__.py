@@ -2,11 +2,6 @@
 __version__ = "0.1.0"
 
 from .metadata import MetadataExtractor, ExtractionResult
-from .core import inspect_file
+from .core import inspect_file, summary_rows, last_gdf
 
-try:
-    from .core import summary_rows
-except:
-    summary_rows = []
-
-__all__ = ["MetadataExtractor", "ExtractionResult", "inspect_file"]
+__all__ = ["MetadataExtractor", "ExtractionResult", "inspect_file", "summary_rows", "last_gdf"]
