@@ -84,9 +84,16 @@ class MetadataResult:
         for key, value in metadata.items():
             new_key = f"{parent_key}{sep}{key}" if parent_key else key
 
+            # # Special handling for Colonnes table
+            # if key == "Colonnes" and isinstance(value, dict) and "_table" in value:
+            #     items.append((f"Nb colonnes détaillées", len(value.get("data", []))))
+
             # Special handling for Colonnes table
             if key == "Colonnes" and isinstance(value, dict) and "_table" in value:
-                items.append((f"Nb colonnes détaillées", len(value.get("data", []))))
+                # Sérialiser la liste des colonnes en JSON
+                import json
+                items.append(("Colonnes (détails)", json.dumps(value.get("data", []), ensure_ascii=False)))
+                items.append(("Nb colonnes détaillées", len(value.get("data", []))))
             elif isinstance(value, dict) and "_table" not in value:
                 # Recursively flatten nested dicts
                 items.extend(MetadataResult._flatten_metadata(value, new_key, sep=sep).items())
