@@ -29,6 +29,9 @@ app.config["JSON_SORT_KEYS"] = False  # Preserve column order in JSON responses
 REFERENCE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "reference_file", "regions.geojson")
 gdf_reference = gpd.read_file(REFERENCE_PATH).to_crs(epsg=2154)
 
+PREVIEW_DIR = tempfile.mkdtemp(prefix="geodata_preview_")
+last_preview_path = {"path": None, "ext": None}
+
 ALLOWED_EXTENSIONS = {".csv", ".txt", ".xlsx", ".geojson", ".json", ".shp", ".gpkg", ".zip"}
 
 # Define the desired column order for the summary display
@@ -183,7 +186,13 @@ def upload():
     try:
         saved_path = os.path.join(tmpdir, file.filename)
         file.save(saved_path)
-
+        
+        ##Save preview 
+        preview_copy = os.path.join(PREVIEW_DIR, file.filename)
+        shutil.copy2(saved_path, preview_copy)
+        last_preview_path["path"] = preview_copy
+        last_preview_path["ext"] = ext
+        
         # If zip, extract and find the data file inside
         filepath_to_inspect = saved_path
         if ext == ".zip":
@@ -265,8 +274,178 @@ def _handle_zip(zip_path, extract_dir):
                 if fname.lower().endswith(ext) and not fname.startswith("._"):
                     return os.path.join(root, fname)
     return None
+    
+@app.route("/preview", methods=["GET"])
+def preview():
+    """Return the first 10 rows of the last uploaded file as JSON."""
+    path = last_preview_path.get("path")
+    ext  = last_preview_path.get("ext")
 
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "No file available for preview."}), 404
 
+    try:
+        if ext in [".csv", ".txt"]:
+            df = pd.read_csv(path, nrows=10, sep=None, engine="python", encoding_errors="replace")
+        elif ext == ".xlsx":
+            df = pd.read_excel(path, nrows=10)
+        elif ext in [".geojson", ".json", ".shp", ".gpkg"]:
+            gdf = gpd.read_file(path, rows=10)
+            df = pd.DataFrame(gdf.drop(columns="geometry", errors="ignore"))
+        else:
+            return jsonify({"error": f"Preview not supported for {ext}"}), 400
+
+        df = df.where(pd.notnull(df), None)
+        df.columns = [str(c) for c in df.columns]
+
+        return jsonify({
+            "columns": df.columns.tolist(),
+            "rows": _make_serializable(df.values.tolist())
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+        
+def _df_to_duckdb(df):
+    """Register a DataFrame in a fresh DuckDB connection and return the connection."""
+    import duckdb
+    conn = duckdb.connect()
+    conn.register("excel_tbl", df)
+    return conn
+
+@app.route("/export", methods=["GET"])
+def export():
+    """Export the full dataset as a geospatial file by re-reading the original."""
+    fmt  = request.args.get("format", "geojson").lower()
+    path = last_preview_path.get("path")
+    ext  = last_preview_path.get("ext")
+
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "No file available for export."}), 404
+
+    SUPPORTED_FORMATS = {"geojson", "gpkg", "shp", "csv"}
+    if fmt not in SUPPORTED_FORMATS:
+        return jsonify({"error": f"Unsupported format '{fmt}'. Choose from: {', '.join(SUPPORTED_FORMATS)}"}), 400
+
+    try:
+        # ── Re-read the FULL file ──────────────────────────────────────────
+        gdf = None
+
+        if ext in [".geojson", ".json", ".shp", ".gpkg"]:
+            # Already a geospatial format — read directly
+            gdf = gpd.read_file(path)
+
+        elif ext in [".csv", ".txt"]:
+            import duckdb
+            conn = duckdb.connect()
+            conn.execute("INSTALL spatial; LOAD spatial;")
+            conn.execute(f"CREATE TABLE data AS SELECT * FROM read_csv_auto('{path}')")
+
+            # Detect geometry columns the same way the inspector does
+            res_geom = inspector.get_geo_columns_duckdb(conn, "data")
+
+            if res_geom['columns'] and res_geom['method'] == 'points_from_xy':
+                x_col, y_col = res_geom['columns']
+                # Detect source CRS
+                detected_crs = inspector.guess_crs_from_coords_duckdb(conn, "data", x_col, y_col) or 4326
+                df = conn.execute("SELECT * FROM data").fetchdf()
+                geometry = gpd.points_from_xy(df[x_col], df[y_col])
+                gdf = gpd.GeoDataFrame(df, geometry=geometry, crs=f"EPSG:{detected_crs}")
+
+            elif res_geom['columns'] and res_geom['method'] == 'linestring_coords':
+                x_start, y_start, x_end, y_end = res_geom['columns']
+                detected_crs = inspector.guess_crs_from_coords_duckdb(conn, "data", x_start, y_start) or 4326
+                df = conn.execute("SELECT * FROM data").fetchdf()
+                from shapely.geometry import LineString
+                def make_line(row):
+                    try:
+                        return LineString([(row[x_start], row[y_start]),
+                                           (row[x_end],   row[y_end])])
+                    except Exception:
+                        return None
+                geometry = df.apply(make_line, axis=1)
+                gdf = gpd.GeoDataFrame(df, geometry=geometry, crs=f"EPSG:{detected_crs}")
+
+            elif res_geom['columns'] and res_geom['method'] in ['from_wkt', 'geojson', 'geopoint']:
+                df = conn.execute("SELECT * FROM data").fetchdf()
+                gdf = inspector.create_geodataframe_from_result(df, res_geom)
+
+            conn.close()
+
+        elif ext == ".xlsx":
+            # Re-read with pandas then reconstruct geometry
+            df = pd.read_excel(path)
+            res_geom = inspector.get_geo_columns_duckdb(
+                _df_to_duckdb(df), "excel_tbl"
+            )
+            if res_geom['columns'] and res_geom['method'] == 'points_from_xy':
+                x_col, y_col = res_geom['columns']
+                import duckdb
+                conn = duckdb.connect()
+                conn.register("excel_tbl", df)
+                detected_crs = inspector.guess_crs_from_coords_duckdb(conn, "excel_tbl", x_col, y_col) or 4326
+                conn.close()
+                geometry = gpd.points_from_xy(df[x_col], df[y_col])
+                gdf = gpd.GeoDataFrame(df, geometry=geometry, crs=f"EPSG:{detected_crs}")
+            else:
+                gdf = inspector.create_geodataframe_from_result(df, res_geom)
+
+        if gdf is None or gdf.empty:
+            return jsonify({"error": "Could not reconstruct geographic data from this file."}), 400
+
+        # Drop rows with null geometry
+        gdf = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty].copy()
+
+        if len(gdf) == 0:
+            return jsonify({"error": "No valid geometries found after filtering nulls."}), 400
+
+        # Reproject to EPSG:2154 for storage formats, WGS84 for GeoJSON/CSV
+        base_name = os.path.splitext(os.path.basename(path))[0]
+
+        if fmt == "geojson":
+            export_path = os.path.join(PREVIEW_DIR, f"{base_name}_export.geojson")
+            gdf.to_crs(epsg=4326).to_file(export_path, driver="GeoJSON")
+            mime = "application/geo+json"
+            download_name = f"{base_name}.geojson"
+
+        elif fmt == "gpkg":
+            export_path = os.path.join(PREVIEW_DIR, f"{base_name}_export.gpkg")
+            gdf.to_crs(epsg=2154).to_file(export_path, driver="GPKG", layer=base_name)
+            mime = "application/geopackage+sqlite3"
+            download_name = f"{base_name}.gpkg"
+
+        elif fmt == "shp":
+            shp_path = os.path.join(PREVIEW_DIR, f"{base_name}_export.shp")
+            gdf.to_crs(epsg=2154).to_file(shp_path, driver="ESRI Shapefile")
+            zip_path = os.path.join(PREVIEW_DIR, f"{base_name}_shp.zip")
+            shp_base = os.path.splitext(shp_path)[0]
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                for suffix in [".shp", ".shx", ".dbf", ".prj", ".cpg"]:
+                    f = shp_base + suffix
+                    if os.path.exists(f):
+                        zf.write(f, os.path.basename(f))
+            export_path = zip_path
+            mime = "application/zip"
+            download_name = f"{base_name}_shp.zip"
+
+        elif fmt == "csv":
+            export_path = os.path.join(PREVIEW_DIR, f"{base_name}_export_geo.csv")
+            gdf_out = gdf.to_crs(epsg=4326).copy()
+            gdf_out["geometry_wkt"] = gdf_out.geometry.apply(
+                lambda g: g.wkt if g else None)
+            pd.DataFrame(gdf_out.drop(columns="geometry")).to_csv(
+                export_path, index=False, encoding="utf-8-sig")
+            mime = "text/csv"
+            download_name = f"{base_name}_geo.csv"
+
+        from flask import send_file
+        return send_file(export_path, mimetype=mime,as_attachment=True, download_name=download_name)
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+    
 if __name__ == "__main__":
     print("=" * 70)
     print("Geodata Inspector - DuckDB-Optimized Version")

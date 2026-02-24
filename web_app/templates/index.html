@@ -193,6 +193,44 @@
                 height: 400px;
             }
         }
+        /* Preview section */
+        .preview-section { margin-top: 1.5rem; display: none; }
+        .preview-btn {
+            padding: 0.5rem 1.2rem; background: #37474f; color: #fff;
+            border: none; border-radius: 4px; cursor: pointer; font-size: 0.9rem;
+        }
+        .preview-btn:hover { background: #263238; }
+        .preview-btn:disabled { background: #90a4ae; cursor: not-allowed; }
+        .preview-table-wrap { overflow-x: auto; margin-top: 1rem; }
+        .preview-table {
+            width: 100%; border-collapse: collapse; font-size: 0.82rem;
+            background: #fff; border-radius: 6px; overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .preview-table th {
+            background: #37474f; color: #fff; padding: 6px 10px;
+            white-space: nowrap; font-weight: 500;
+        }
+        .preview-table td {
+            padding: 5px 10px; border-bottom: 1px solid #eceff1;
+            max-width: 180px; overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap;
+        }
+        .preview-table tr:nth-child(even) td { background: #f5f7fa; }
+        .preview-table tr:hover td { background: #e3f2fd; }
+        /* Export section */
+        .export-section { margin-top: 1rem; display: none; }
+        .export-label { font-size: 0.85rem; color: #607d8b; margin-bottom: 0.5rem; }
+        .export-btns { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+        .export-btn {
+            padding: 0.45rem 1rem; border: none; border-radius: 4px;
+            cursor: pointer; font-size: 0.85rem; color: #fff; font-weight: 500;
+        }
+        .export-btn:hover { opacity: 0.85; }
+        .export-btn.geojson { background: #2e7d32; }
+        .export-btn.gpkg    { background: #1565c0; }
+        .export-btn.shp     { background: #6a1b9a; }
+        .export-btn.csv     { background: #e65100; }
     </style>
 </head>
 <body>
@@ -224,6 +262,22 @@
                 <table>
                     <tbody id="resultsBody"></tbody>
                 </table>
+                <div class="preview-section" id="previewSection">
+                    <button class="preview-btn" id="previewBtn" onclick="loadPreview()">
+                        👁 Aperçu des données (10 lignes)
+                    </button>
+                    <div class="preview-table-wrap" id="previewTableWrap"></div>
+                </div>
+                <div class="export-section" id="exportSection">
+                    <p class="export-label">⬇ Exporter le dataset complet en données géographiques :</p>
+                    <div class="export-btns">
+                        <button class="export-btn geojson" onclick="exportData('geojson')">GeoJSON</button>
+                        <button class="export-btn gpkg"    onclick="exportData('gpkg')">GeoPackage</button>
+                        <button class="export-btn shp"     onclick="exportData('shp')">Shapefile (.zip)</button>
+                        <button class="export-btn csv"     onclick="exportData('csv')">CSV + WKT</button>
+                    </div>
+                    <div id="exportStatus" style="font-size:0.85rem; margin-top:0.5rem; color:#607d8b;"></div>
+                </div>
             </div>
 
             <div class="map-container" id="mapContainer">
@@ -232,6 +286,9 @@
                 <div id="noMapData" class="no-map-data" style="display: none;">
                     Pas de données géographiques
                 </div>
+                <p id="mapNote" style="display:none; margin-top:0.5rem; font-size:0.8rem; color:#90a4ae; text-align:left;">
+                    ℹ️ Aperçu cartographique limité à 1 000 enregistrements. Utilisez l'export pour obtenir le dataset complet.
+                </p>
             </div>
         </div>
     </div>
@@ -251,6 +308,9 @@
         const logsToggle = document.getElementById('logsToggle');
         const logsContent = document.getElementById('logsContent');
         const clearBtn = document.getElementById('clearBtn');
+        const previewSection = document.getElementById('previewSection');
+        const previewBtn = document.getElementById('previewBtn');
+        const previewTableWrap = document.getElementById('previewTableWrap');
 
         let map = null;
 
@@ -281,7 +341,11 @@
 
             // Hide clear button
             clearBtn.style.display = 'none';
-
+            document.getElementById('mapNote').style.display = 'none';
+            previewSection.style.display = 'none';
+            previewTableWrap.innerHTML = '';
+            document.getElementById('exportSection').style.display = 'none';
+            
             console.log('[Geodata Inspector] Interface cleared');
         });
 
@@ -402,9 +466,14 @@
 
                     // Show clear button after successful upload
                     clearBtn.style.display = 'inline-block';
+                    previewSection.style.display = 'block';
+                    previewTableWrap.innerHTML = '';
+                    previewBtn.textContent = '👁 Aperçu des données (10 lignes)';
+                    document.getElementById('exportSection').style.display = 'block';
 
                     if (data.map) {
                         addLog('Génération de la carte...', 'success');
+                        document.getElementById('mapNote').style.display = 'block';
                         displayMap(data.map);
                     } else {
                         // Show "no geographic data" message
@@ -477,6 +546,78 @@
                 resultsBody.appendChild(tr);
             }
             results.style.display = 'block';
+        }
+        async function loadPreview() {
+            // Toggle: if table is already visible, hide it and reset
+            if (previewTableWrap.innerHTML !== '') {
+                previewTableWrap.innerHTML = '';
+                previewBtn.textContent = '👁 Aperçu des données (10 lignes)';
+                return;
+            }
+            previewBtn.textContent = '⏳ Chargement...';
+            previewBtn.disabled = true;
+            previewTableWrap.innerHTML = '';
+
+            try {
+                const resp = await fetch('/preview');
+                const data = await resp.json();
+
+                if (data.error) {
+                    previewTableWrap.innerHTML = `<p style="color:#c62828; margin-top:0.5rem">${data.error}</p>`;
+                } else {
+                    let html = '<table class="preview-table"><thead><tr>';
+                    data.columns.forEach(c => { html += `<th title="${c}">${c}</th>`; });
+                    html += '</tr></thead><tbody>';
+                    data.rows.forEach(row => {
+                        html += '<tr>';
+                        row.forEach(v => {
+                            const display = v !== null && v !== undefined ? String(v) : '';
+                            html += `<td title="${display}">${display}</td>`;
+                        });
+                        html += '</tr>';
+                    });
+                    html += '</tbody></table>';
+                    previewTableWrap.innerHTML = html;
+                }
+            } catch(e) {
+                previewTableWrap.innerHTML = `<p style="color:#c62828; margin-top:0.5rem">Erreur: ${e.message}</p>`;
+            } finally {
+                previewBtn.textContent = '👁 Aperçu des données (10 lignes)';
+                previewBtn.disabled = false;
+            }
+        }
+        async function exportData(fmt) {
+            const exportStatus = document.getElementById('exportStatus');
+            exportStatus.textContent = '⏳ Re-lecture et conversion du fichier complet, merci de patienter...';
+            
+            try {
+                const resp = await fetch(`/export?format=${fmt}`);
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    exportStatus.textContent = `Erreur : ${err.error}`;
+                    return;
+                }
+
+                // Trigger browser download
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = resp.headers.get('Content-Disposition')
+                    ?.split('filename=')[1]?.replace(/"/g, '')
+                    || `export.${fmt}`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+
+                exportStatus.textContent = `✓ Export ${fmt.toUpperCase()} téléchargé.`;
+                setTimeout(() => { exportStatus.textContent = ''; }, 4000);
+
+            } catch(e) {
+                exportStatus.textContent = `Erreur : ${e.message}`;
+            }
         }
 
         function displayMap(mapData) {
