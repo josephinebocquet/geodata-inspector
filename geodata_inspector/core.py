@@ -122,6 +122,29 @@ def completeness_score_duckdb(conn, table_name):
         "Score de complétude std": round(std_completeness, 2)
     }
 
+def completeness_score_duckdb_cols(conn, table_name, columns):
+    """Calculate completeness score restricted to a specific list of columns."""
+    if not columns:
+        return {"Score de complétude moyen": "N/A", "Score de complétude std": "N/A"}
+
+    null_counts_sql = ", ".join([
+        f"SUM(CASE WHEN \"{col}\" IS NULL THEN 1 ELSE 0 END)::DOUBLE / COUNT(*)::DOUBLE as null_ratio_{i}"
+        for i, col in enumerate(columns)
+    ])
+
+    result = conn.execute(f"SELECT {null_counts_sql} FROM {table_name}").fetchone()
+
+    if result is None:
+        return {"Score de complétude moyen": 0, "Score de complétude std": 0}
+
+    null_ratios = [r for r in result if r is not None]
+    mean_completeness = 1 - np.mean(null_ratios)
+    std_completeness = np.std(null_ratios)
+
+    return {
+        "Score de complétude moyen": round(mean_completeness, 2),
+        "Score de complétude std": round(std_completeness, 2)
+    }
 
 def build_columns_detail_duckdb(conn, table_name, limit=5):
     """Build column details using DuckDB."""
@@ -203,10 +226,10 @@ def detect_geo_join_keys_duckdb(conn, table_name):
 
             # Détecter le pattern "Nom (Code)" — extraire la longueur du code entre parenthèses
             code_in_parens_len = conn.execute(f"""
-                SELECT AVG(LENGTH(REGEXP_EXTRACT(CAST("{col}" AS VARCHAR), '\(([^)]+)\)', 1)))
+                SELECT AVG(LENGTH(REGEXP_EXTRACT(CAST("{col}" AS VARCHAR), '\\(([^)]+)\\)', 1)))
                 FROM {table_name}
                 WHERE "{col}" IS NOT NULL
-                  AND REGEXP_EXTRACT(CAST("{col}" AS VARCHAR), '\(([^)]+)\)', 1) != ''
+                  AND REGEXP_EXTRACT(CAST("{col}" AS VARCHAR), '\\(([^)]+)\\)', 1) != ''
             """).fetchone()[0]
 
             if code_in_parens_len:
@@ -525,7 +548,7 @@ def process_geometry_duckdb_points(conn, table_name, x_col, y_col, gdf_metro):
         excluded = total_with_coords - filtered_count
         print(f"[DuckDB Spatial] Filtered to metropolitan France: {filtered_count:,} points ({excluded:,} outre-mer excluded)")
 
-    return _compute_spatial_metrics_duckdb(conn, "geo_processed", "Point", gdf_metro, start)
+    return _compute_spatial_metrics_duckdb(conn, "geo_processed", "Point", gdf_metro, start,source_crs=detected_crs)
 
 
 def process_geometry_duckdb_linestrings(conn, table_name, x_start, y_start, x_end, y_end, gdf_metro):
@@ -618,7 +641,7 @@ def process_geometry_duckdb_linestrings(conn, table_name, x_start, y_start, x_en
         excluded = total_with_coords - filtered_count
         print(f"[DuckDB Spatial] Filtered to metropolitan France: {filtered_count:,} lines ({excluded:,} outre-mer excluded)")
 
-    return _compute_spatial_metrics_duckdb(conn, "geo_processed", "LineString", gdf_metro, start)
+    return _compute_spatial_metrics_duckdb(conn, "geo_processed", "LineString", gdf_metro, start,source_crs=detected_crs)
 
 
 def guess_crs_from_bounds_duckdb(conn, table_name, geom_col):
@@ -750,10 +773,9 @@ def process_geometry_duckdb_native(conn, table_name, geom_col, gdf_metro):
     conn.execute("DROP TABLE IF EXISTS geo_processed")
     conn.execute("ALTER TABLE geo_filtered RENAME TO geo_processed")
 
-    return _compute_spatial_metrics_duckdb(conn, "geo_processed", geom_type, gdf_metro, start)
-
-
-def _compute_spatial_metrics_duckdb(conn, table_name, geom_type, gdf_metro, start_time):
+    return _compute_spatial_metrics_duckdb(conn, "geo_processed", geom_type, gdf_metro, start,source_crs=detected_crs)
+    
+def _compute_spatial_metrics_duckdb(conn, table_name, geom_type, gdf_metro, start_time, source_crs=None):
     """
     Compute spatial metrics using DuckDB spatial functions.
     Shared logic for both point and native geometry processing.
@@ -856,8 +878,8 @@ def _compute_spatial_metrics_duckdb(conn, table_name, geom_type, gdf_metro, star
     display_geom_type = geom_type.replace("ST_", "").title()
 
     return {
-        "Score de complétude géographique": f"% présentes: {round(non_empty/total, 2)}, % valides: {round(valid_count/total, 2)}",
-        "CRS": "EPSG:2154",
+        "Score de complétude géographique": f"présentes: {round(non_empty/total, 2)}, valides: {round(valid_count/total, 2)}",
+        "CRS": f"EPSG:{source_crs}" if source_crs and source_crs != 2154 else "EPSG:2154",
         "Types de géométrie": display_geom_type,
         "Emprise estimée (km2)": round(area_km2, 2),
         "Densité (obj/km2)": round(density, 2),
@@ -936,7 +958,7 @@ def process_geometry_duckdb(conn, table_name, x_col, y_col, gdf_metro):
     print(f"[DuckDB Spatial] Geometry processing done in {processing_time:.2f}s")
 
     return {
-        "Score de complétude géographique": f"% présentes: {round(non_empty/total, 2)}, % valides: {round(valid_count/total, 2)}",
+        "Score de complétude géographique": f"présentes: {round(non_empty/total, 2)}, valides: {round(valid_count/total, 2)}",
         "CRS": "EPSG:2154",  # Assumed Lambert 93 based on coordinate ranges
         "Types de géométrie": "Point",
         "Emprise estimée (km2)": round(area_km2, 2),
@@ -1001,6 +1023,9 @@ def inspect_csv_duckdb(filepath, gdf_metro):
     geo_keys = detect_geo_join_keys_duckdb(conn, "csv_data")
     res_geom = get_geo_columns_duckdb(conn, "csv_data")
 
+    geo_key_cols = [k.split(" (")[0] for k in geo_keys]
+    geo_key_completeness = completeness_score_duckdb_cols(conn, "csv_data", geo_key_cols)
+
     # Build base summary
     base_summary = {
         **meta,
@@ -1011,7 +1036,7 @@ def inspect_csv_duckdb(filepath, gdf_metro):
         "Score de complétude global": completeness_score_duckdb(conn, "csv_data"),
         "Clés géographiques": ", ".join(geo_keys) if geo_keys else "Aucune",
         "Géotransformation": res_geom['geotrans'],
-        "Score de complétude des clés géographique": {"Score de complétude moyen": "N/A", "Score de complétude std": "N/A"},
+        "Score de complétude des clés géographique": geo_key_completeness,
     }
 
     geo_summary = get_default_geo_summary()
@@ -1034,8 +1059,11 @@ def inspect_csv_duckdb(filepath, gdf_metro):
         """).fetchdf()
 
         if len(sample_df) > 0:
+            detected_crs = guess_crs_from_coords_duckdb(conn, "csv_data", x_col, y_col) or 2154
             geometry = gpd.points_from_xy(sample_df[x_col], sample_df[y_col])
-            last_gdf = gpd.GeoDataFrame(sample_df, geometry=geometry, crs="EPSG:2154")
+            last_gdf = gpd.GeoDataFrame(sample_df, geometry=geometry, crs=f"EPSG:{detected_crs}")
+            if detected_crs != 2154:
+                last_gdf = last_gdf.to_crs(epsg=2154)              
 
     elif res_geom['columns'] and res_geom['method'] == 'linestring_coords':
         print(f"[DuckDB] Geometry detected: {res_geom['columns']} ({res_geom['method']})")
@@ -1502,8 +1530,14 @@ def inspect_excel(filepath, gdf_metro, sample_size=5000):
     conn.register('excel_data', df)
     conn.execute("CREATE TABLE excel_tbl AS SELECT * FROM excel_data")
 
+
+
     geo_keys = detect_geo_join_keys_duckdb(conn, "excel_data")
-    
+    res_geom = get_geo_columns_duckdb(conn, "excel_data")
+
+    geo_key_cols = [k.split(" (")[0] for k in geo_keys]
+    geo_key_completeness = completeness_score_duckdb_cols(conn, "excel_data", geo_key_cols)
+
     # Build sheet info
     sheet_info = f"Feuilles: {len(sheet_names)}, analysée: {best_sheet}"
     if header_row > 0:
@@ -1518,7 +1552,7 @@ def inspect_excel(filepath, gdf_metro, sample_size=5000):
         "Score de complétude global": completeness_score_duckdb(conn, "excel_tbl"),
         "Clés géographiques": ", ".join(geo_keys) if geo_keys else "Aucune",
         "Géotransformation": res_geom['geotrans'],
-        "Score de complétude des clés géographique": {"Score de complétude moyen": "N/A", "Score de complétude std": "N/A"},
+        "Score de complétude des clés géographique": geo_key_completeness,
     }
 
     geo_summary = get_default_geo_summary()
@@ -1534,8 +1568,12 @@ def inspect_excel(filepath, gdf_metro, sample_size=5000):
 
         # Create sample GeoDataFrame for map display
         sample_df = df.sample(n=min(1000, len(df)), random_state=42)
+        detected_crs = guess_crs_from_coords_duckdb(conn, "excel_tbl", x_col, y_col) or 2154
         geometry = gpd.points_from_xy(sample_df[x_col], sample_df[y_col])
-        last_gdf = gpd.GeoDataFrame(sample_df, geometry=geometry, crs="EPSG:2154")
+        last_gdf = gpd.GeoDataFrame(sample_df, geometry=geometry, crs=f"EPSG:{detected_crs}")
+        
+        if detected_crs != 2154:
+            last_gdf = last_gdf.to_crs(epsg=2154)
 
     elif res_geom['columns'] and res_geom['method'] == 'linestring_coords':
         print(f"[DuckDB] Geometry: {res_geom['columns']} ({res_geom['method']})")
@@ -1635,13 +1673,15 @@ def inspect_geospatial_duckdb(filepath, gdf_metro):
             print(f"[WARN] Aucune colonne géométrique trouvée. Colonnes disponibles: {schema['column_name'].tolist()}")
 
         # Detect geo join keys
+
         geo_keys = detect_geo_join_keys_duckdb(conn, "geo_data")
-        # Detect geo join keys
-        geo_keys = detect_geo_join_keys_duckdb(conn, "geo_data")
+        res_geom = get_geo_columns_duckdb(conn, "geo_data")
+    
+        geo_key_cols = [k.split(" (")[0] for k in geo_keys]
+        geo_key_completeness = completeness_score_duckdb_cols(conn, "geo_data", geo_key_cols)
         
         # Get completeness and column details
         completeness = completeness_score_duckdb(conn, "geo_data")
-
         
         columns_detail = build_columns_detail_duckdb(conn, "geo_data")
 
@@ -1687,7 +1727,7 @@ def inspect_geospatial_duckdb(filepath, gdf_metro):
             "Score de complétude global": completeness,
             "Clés géographiques": ", ".join(geo_keys) if geo_keys else "Aucune",
             "Géotransformation": "Données géographiques",
-            "Score de complétude des clés géographique": {"Score de complétude moyen": "N/A", "Score de complétude std": "N/A"}
+            "Score de complétude des clés géographique": geo_key_completeness
         }
 
         granularite = detect_granularite(
@@ -1701,6 +1741,8 @@ def inspect_geospatial_duckdb(filepath, gdf_metro):
         })
         total_time = time.time() - start_time
         print(f"[DuckDB] Total inspection time: {total_time:.2f}s")
+        print(summary_rows)
+
         print(f"\n{filepath} done\n")
 
     except Exception as e:
@@ -1850,7 +1892,7 @@ def process_geodataframe(gdf, gdf_metro, compute_duplicates=True):
         doublons = pourcentage_geometries_dupliquees(gdf_proj) if compute_duplicates else {'Part des geometries dupliquees (%)': 0}
 
         geo_metrics = {
-            "Score de complétude géographique": f"% présentes: {round(non_empty/total, 2)}, % valides: {round(valid_count/total, 2)}",
+            "Score de complétude géographique": f"présentes: {round(non_empty/total, 2)}, valides: {round(valid_count/total, 2)}",
             "CRS": gdf_proj.crs.to_string() if gdf_proj.crs else "Non défini",
             "Types de géométrie": ", ".join(gdf_proj.geom_type.value_counts().index.tolist()),
             "Emprise estimée (km2)": round(area_km2, 2),

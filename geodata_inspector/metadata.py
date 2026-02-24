@@ -196,7 +196,7 @@ class MetadataExtractor:
                 return MetadataResult(
                     filepath=filepath,
                     metadata=metadata,
-                    elapsed_time=elapsed_time
+                    elapsed_time=round(elapsed_time, 2)               
                 )
             else:
                 return MetadataResult(
@@ -212,7 +212,7 @@ class MetadataExtractor:
             return MetadataResult(
                 filepath=filepath,
                 error=error_msg,
-                elapsed_time=elapsed_time
+                elapsed_time=round(elapsed_time, 2)
             )
 
     def extract_batch(self, filepaths: List[str],
