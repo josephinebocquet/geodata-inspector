@@ -157,13 +157,21 @@ def build_columns_detail_duckdb(conn, table_name, limit=5):
 
         # Get sample value and null count
         try:
-            sample = conn.execute(f"""
-                SELECT "{col_name}" FROM {table_name}
-                WHERE "{col_name}" IS NOT NULL
-                LIMIT 1
-            """).fetchone()
+            # For geometry columns, convert WKB to readable WKT
+            if col_type.upper() in ('GEOMETRY', 'BLOB') or 'GEOM' in col_name.upper():
+                sample = conn.execute(f"""
+                    SELECT ST_AsText("{col_name}") FROM {table_name}
+                    WHERE "{col_name}" IS NOT NULL
+                    LIMIT 1
+                """).fetchone()
+            else:
+                sample = conn.execute(f"""
+                    SELECT "{col_name}" FROM {table_name}
+                    WHERE "{col_name}" IS NOT NULL
+                    LIMIT 1
+                """).fetchone()
             sample_val = str(sample[0]) if sample else "N/A"
-
+            
             null_count = conn.execute(f"""
                 SELECT COUNT(*) FROM {table_name} WHERE "{col_name}" IS NULL
             """).fetchone()[0]
@@ -508,6 +516,7 @@ def process_geometry_duckdb_points(conn, table_name, x_col, y_col, gdf_metro):
     detected_crs = guess_crs_from_coords_duckdb(conn, table_name, x_col, y_col)
 
     if detected_crs is None:
+        print(f"[DuckDB Spatial] No CRS Detected - default EPSG:2154")
         detected_crs = 2154  # Default to Lambert 93
 
     print(f"[DuckDB Spatial] Detected CRS: EPSG:{detected_crs}")
@@ -594,6 +603,7 @@ def process_geometry_duckdb_linestrings(conn, table_name, x_start, y_start, x_en
     # Detect CRS from start coordinates
     detected_crs = guess_crs_from_coords_duckdb(conn, "geo_coords", "x_s", "y_s")
     if detected_crs is None:
+        print(f"[DuckDB Spatial] No CRS Detected - default EPSG:2154")
         detected_crs = 2154
 
     print(f"[DuckDB Spatial] Detected CRS: EPSG:{detected_crs}")
@@ -879,7 +889,7 @@ def _compute_spatial_metrics_duckdb(conn, table_name, geom_type, gdf_metro, star
 
     return {
         "Score de complétude géographique": f"présentes: {round(non_empty/total, 2)}, valides: {round(valid_count/total, 2)}",
-        "CRS": f"EPSG:{source_crs}" if source_crs and source_crs != 2154 else "EPSG:2154",
+        "CRS": f"EPSG:{source_crs}" if source_crs and source_crs != 2154 else "Not found - default EPSG:2154",
         "Types de géométrie": display_geom_type,
         "Emprise estimée (km2)": round(area_km2, 2),
         "Densité (obj/km2)": round(density, 2),
@@ -1633,13 +1643,15 @@ def inspect_geospatial_duckdb(filepath, gdf_metro):
     Uses DuckDB spatial for all geometry operations (much faster than GeoPandas).
     """
     global last_gdf
+    os.environ["SHAPE_RESTORE_SHX"] = "YES"
+
 
     print(f"[DuckDB] Inspecting geospatial file: {filepath}")
     start_time = time.time()
 
     conn = get_duckdb_connection()
 
-    try:
+    try:        
         # Use DuckDB's spatial extension to read the file
         conn.execute(f"""
             CREATE TABLE geo_data AS
@@ -1741,7 +1753,6 @@ def inspect_geospatial_duckdb(filepath, gdf_metro):
         })
         total_time = time.time() - start_time
         print(f"[DuckDB] Total inspection time: {total_time:.2f}s")
-        print(summary_rows)
 
         print(f"\n{filepath} done\n")
 
@@ -1868,6 +1879,8 @@ def process_geodataframe(gdf, gdf_metro, compute_duplicates=True):
             if epsg_crs:
                 gdf = gdf.set_crs(epsg=epsg_crs)
 
+        source_crs_str = gdf.crs.to_string() if gdf.crs else None
+
         if gdf.crs is not None and gdf.crs.to_string() != "EPSG:2154":
             gdf_proj = gdf.to_crs(epsg=2154)
         else:
@@ -1893,7 +1906,8 @@ def process_geodataframe(gdf, gdf_metro, compute_duplicates=True):
 
         geo_metrics = {
             "Score de complétude géographique": f"présentes: {round(non_empty/total, 2)}, valides: {round(valid_count/total, 2)}",
-            "CRS": gdf_proj.crs.to_string() if gdf_proj.crs else "Non défini",
+            "CRS": f"Detected CRS - {source_crs_str} (transformed to {gdf_proj.crs.to_string()})" if source_crs_str else (gdf_proj.crs.to_string() if gdf_proj.crs else "Non défini"),
+            # "CRS": gdf_proj.crs.to_string() if gdf_proj.crs else "Non défini",
             "Types de géométrie": ", ".join(gdf_proj.geom_type.value_counts().index.tolist()),
             "Emprise estimée (km2)": round(area_km2, 2),
             "Densité (obj/km2)": round(density, 2),

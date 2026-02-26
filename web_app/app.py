@@ -490,7 +490,42 @@ def batch_download_excel():
                          as_attachment=True, download_name="geodata_batch_results.xlsx")
     except Exception as e:
         return jsonify({"error": str(e)}), 500    
-        
+
+@app.route("/batch/result/<int:index>", methods=["GET"])
+def batch_result(index):
+    """Return a single batch result by index for display in the UI."""
+    path = batch_state.get("output_path")
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "No batch results available."}), 404
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        if index < 0 or index >= len(df):
+            return jsonify({"error": "Index out of range."}), 404
+
+        row = df.iloc[index].to_dict()
+
+        # Try to parse JSON strings back to objects for display
+        for k, v in row.items():
+            if isinstance(v, str) and v.strip().startswith('{'):
+                try:
+                    row[k] = json.loads(v)
+                except Exception:
+                    pass
+
+        # Reorder to match COLUMN_ORDER
+        ordered = _reorder_summary(row)
+
+        return jsonify({
+            "index": index,
+            "total": len(df),
+            "filename": row.get("Nom du fichier", f"Fichier {index+1}"),
+            "summary": _make_serializable(ordered)
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/batch_dir", methods=["POST"])
 def batch_dir():
     """Accept multiple uploaded files directly (from webkitdirectory picker)."""
