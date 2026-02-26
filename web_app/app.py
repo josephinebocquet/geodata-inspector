@@ -12,7 +12,8 @@ from flask import Flask, request, jsonify, render_template
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-
+from concurrent.futures import ThreadPoolExecutor
+import threading
 # Ajoute la racine du repo au path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # Ensure this directory is on the path so imports resolve
@@ -22,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import geodata_inspector.core as inspector
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB max upload
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2 GB max upload
 app.config["JSON_SORT_KEYS"] = False  # Preserve column order in JSON responses
 
 # Pre-load the reference geodataframe once at startup
@@ -32,12 +33,23 @@ gdf_reference = gpd.read_file(REFERENCE_PATH).to_crs(epsg=2154)
 PREVIEW_DIR = tempfile.mkdtemp(prefix="geodata_preview_")
 last_preview_path = {"path": None, "ext": None}
 
+# Batch processing state
+batch_state = {
+    "running": False,
+    "total": 0,
+    "done": 0,
+    "current": "",
+    "errors": [],
+    "output_path": None,
+}
+batch_executor = ThreadPoolExecutor(max_workers=1)
+
 ALLOWED_EXTENSIONS = {".csv", ".txt", ".xlsx", ".geojson", ".json", ".shp", ".gpkg", ".zip"}
 
 # Define the desired column order for the summary display
 COLUMN_ORDER = [
     # File metadata
-    "Dossier",
+    # "Dossier",
     "Nom du fichier",
     "Taille (Ko)",
     "Date de création du fichier (Y-M-D)",
@@ -186,7 +198,11 @@ def upload():
     try:
         saved_path = os.path.join(tmpdir, file.filename)
         file.save(saved_path)
-        
+        # Save any sidecar files (e.g. .shx, .dbf, .prj for shapefiles)
+        for sidecar in request.files.getlist('sidecars'):
+            sidecar_path = os.path.join(tmpdir, sidecar.filename)
+            sidecar.save(sidecar_path)
+            
         ##Save preview 
         preview_copy = os.path.join(PREVIEW_DIR, file.filename)
         shutil.copy2(saved_path, preview_copy)
@@ -202,11 +218,6 @@ def upload():
                     "error": "ZIP archive does not contain a supported data file (.shp, .geojson, .csv, .xlsx, .gpkg)."
                 }), 400
 
-        # # Clear global summary list and last GeoDataFrame
-        # if inspector.summary_rows is not None : 
-        #     inspector.summary_rows.clear()
-        # if inspector.last_gdf is None : 
-        #     inspector.last_gdf = None
         if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
             inspector.summary_rows.clear()
         inspector.last_gdf = None
@@ -261,19 +272,47 @@ def upload():
 
 
 def _handle_zip(zip_path, extract_dir):
-    """Extract a ZIP and return the path to the first supported data file."""
+    """
+    Extract a ZIP and return either:
+    - A single file path (if zip contains one supported file, or one dominant data file)
+    - A directory path prefixed with 'DIR:' (if zip contains multiple data files → treat as batch)
+    """
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(extract_dir)
 
-    # Priority order for file detection inside the zip
-    priority = [".shp", ".gpkg", ".geojson", ".json", ".csv", ".txt", ".xlsx"]
+    GEO_EXTS   = {".shp", ".gpkg", ".geojson", ".json"}
+    TABLE_EXTS = {".csv", ".txt", ".xlsx"}
+    ALL_EXTS   = GEO_EXTS | TABLE_EXTS
 
-    for ext in priority:
-        for root, _, files in os.walk(extract_dir):
-            for fname in files:
-                if fname.lower().endswith(ext) and not fname.startswith("._"):
-                    return os.path.join(root, fname)
-    return None
+    candidates = []
+    for root, _, files in os.walk(extract_dir):
+        for fname in files:
+            if fname.startswith("._"):
+                continue
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in ALL_EXTS:
+                full_path = os.path.join(root, fname)
+                candidates.append((ext, os.path.getsize(full_path), full_path))
+
+    if not candidates:
+        return None
+
+    # Single file → read it directly regardless of type
+    if len(candidates) == 1:
+        return candidates[0][2]
+
+    # Multiple files → check if there is one dominant geospatial file
+    geo_files = [c for c in candidates if c[0] in GEO_EXTS]
+    if len(geo_files) == 1:
+        return geo_files[0][2]
+
+    # Shapefile components (.shp + .shx + .dbf) count as one file
+    shp_files = [c for c in candidates if c[0] == ".shp"]
+    if len(shp_files) == 1:
+        return shp_files[0][2]
+
+    # Multiple real data files → treat as a batch directory
+    return f"DIR:{extract_dir}"
     
 @app.route("/preview", methods=["GET"])
 def preview():
@@ -307,6 +346,218 @@ def preview():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
         
+@app.route("/batch", methods=["POST"])
+def batch_upload():
+    """Accept a directory zip or multiple files and process them all."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded."}), 400
+
+    file = request.files["file"]
+    ext  = os.path.splitext(file.filename)[-1].lower()
+
+    if ext != ".zip":
+        return jsonify({"error": "Batch mode requires a ZIP archive containing your dataset files."}), 400
+
+    if batch_state["running"]:
+        return jsonify({"error": "A batch job is already running. Please wait."}), 409
+
+    tmpdir = tempfile.mkdtemp(prefix="geodata_batch_")
+    zip_path = os.path.join(tmpdir, file.filename)
+    file.save(zip_path)
+
+    # Detect contents
+    result = _handle_zip(zip_path, tmpdir)
+
+    if result is None:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return jsonify({"error": "ZIP contains no supported data files."}), 400
+
+    if not result.startswith("DIR:"):
+        # Single file inside zip — redirect to normal single-file inspection
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return jsonify({"error": "ZIP contains only one file. Please use the standard upload button instead."}), 400
+
+    data_dir = result[4:]  # strip "DIR:" prefix
+
+    # Collect all files
+    ALL_EXTS = {".csv", ".txt", ".xlsx", ".geojson", ".json", ".shp", ".gpkg"}
+    files_to_process = []
+    for root, _, files_in_dir in os.walk(data_dir):
+        for fname in sorted(files_in_dir):
+            if fname.startswith("._"):
+                continue
+            if os.path.splitext(fname)[1].lower() in ALL_EXTS:
+                files_to_process.append(os.path.join(root, fname))
+
+    if not files_to_process:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return jsonify({"error": "No supported files found in the ZIP."}), 400
+
+    # Reset batch state
+    batch_state.update({
+        "running": True,
+        "total": len(files_to_process),
+        "done": 0,
+        "current": "",
+        "errors": [],
+        "output_path": None,
+    })
+
+    output_csv = os.path.join(PREVIEW_DIR, f"batch_results_{os.path.basename(zip_path)}.csv")
+
+    def run_batch():
+        try:
+            all_rows = []
+            for filepath in files_to_process:
+                batch_state["current"] = os.path.basename(filepath)
+                try:
+                    if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
+                        inspector.summary_rows.clear()
+                    inspector.last_gdf = None
+
+                    inspector.inspect_file(filepath, gdf_reference)
+
+                    if inspector.summary_rows:
+                        all_rows.append(dict(inspector.summary_rows[-1]))
+                except Exception as e:
+                    batch_state["errors"].append(f"{os.path.basename(filepath)}: {str(e)}")
+                finally:
+                    batch_state["done"] += 1
+
+            # Write CSV output
+            if all_rows:
+                df_out = pd.DataFrame(all_rows)
+                # Flatten dict columns to JSON strings for CSV
+                for col in df_out.columns:
+                    if df_out[col].dtype == object:
+                        df_out[col] = df_out[col].apply(
+                            lambda v: json.dumps(v, ensure_ascii=False)
+                            if isinstance(v, dict) else v
+                        )
+                df_out.to_csv(output_csv, index=False, encoding="utf-8-sig")
+                batch_state["output_path"] = output_csv
+
+        except Exception as e:
+            batch_state["errors"].append(f"Fatal: {str(e)}")
+        finally:
+            batch_state["running"] = False
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    batch_executor.submit(run_batch)
+
+    return jsonify({
+        "message": f"Batch started: {len(files_to_process)} files to process.",
+        "total": len(files_to_process)
+    })
+
+
+@app.route("/batch/status", methods=["GET"])
+def batch_status():
+    """Poll batch job progress."""
+    return jsonify({
+        "running":  batch_state["running"],
+        "total":    batch_state["total"],
+        "done":     batch_state["done"],
+        "current":  batch_state["current"],
+        "errors":   batch_state["errors"],
+        "finished": not batch_state["running"] and batch_state["done"] > 0,
+        "has_output": batch_state["output_path"] is not None,
+    })
+
+
+@app.route("/batch/download", methods=["GET"])
+def batch_download():
+    """Download the batch results CSV."""
+    path = batch_state.get("output_path")
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "No batch results available."}), 404
+    from flask import send_file
+    return send_file(path, mimetype="text/csv",
+                     as_attachment=True, download_name="geodata_batch_results.csv")
+    
+@app.route("/batch/download/excel", methods=["GET"])
+def batch_download_excel():
+    """Download the batch results as Excel."""
+    path = batch_state.get("output_path")
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "No batch results available."}), 404
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        excel_path = path.replace(".csv", ".xlsx")
+        df.to_excel(excel_path, index=False)
+        from flask import send_file
+        return send_file(excel_path, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                         as_attachment=True, download_name="geodata_batch_results.xlsx")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500    
+        
+@app.route("/batch_dir", methods=["POST"])
+def batch_dir():
+    """Accept multiple uploaded files directly (from webkitdirectory picker)."""
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"error": "No files received."}), 400
+
+    if batch_state["running"]:
+        return jsonify({"error": "A batch job is already running."}), 409
+
+    # Save all files to a temp dir
+    tmpdir = tempfile.mkdtemp(prefix="geodata_batchdir_")
+    saved_paths = []
+    for f in files:
+        # Flatten subdirectory structure using underscores to avoid collisions
+        safe_name = f.filename.replace("\\", "/").lstrip("/").replace("/", "_")
+        dest = os.path.join(tmpdir, safe_name)
+        f.save(dest)
+        saved_paths.append(dest)
+
+    batch_state.update({
+        "running": True,
+        "total": len(saved_paths),
+        "done": 0,
+        "current": "",
+        "errors": [],
+        "output_path": None,
+    })
+
+    output_csv = os.path.join(PREVIEW_DIR, "batch_dir_results.csv")
+
+    def run_batch():
+        try:
+            all_rows = []
+            for filepath in saved_paths:
+                batch_state["current"] = os.path.basename(filepath)
+                try:
+                    if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
+                        inspector.summary_rows.clear()
+                    inspector.last_gdf = None
+                    inspector.inspect_file(filepath, gdf_reference)
+                    if inspector.summary_rows:
+                        all_rows.append(dict(inspector.summary_rows[-1]))
+                except Exception as e:
+                    batch_state["errors"].append(f"{os.path.basename(filepath)}: {str(e)}")
+                finally:
+                    batch_state["done"] += 1
+
+            if all_rows:
+                df_out = pd.DataFrame(all_rows)
+                for col in df_out.columns:
+                    if df_out[col].dtype == object:
+                        df_out[col] = df_out[col].apply(
+                            lambda v: json.dumps(v, ensure_ascii=False)
+                            if isinstance(v, dict) else v
+                        )
+                df_out.to_csv(output_csv, index=False, encoding="utf-8-sig")
+                batch_state["output_path"] = output_csv
+        except Exception as e:
+            batch_state["errors"].append(f"Fatal: {str(e)}")
+        finally:
+            batch_state["running"] = False
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    batch_executor.submit(run_batch)
+    return jsonify({"message": f"Batch started: {len(saved_paths)} files.", "total": len(saved_paths)})   
+    
 def _df_to_duckdb(df):
     """Register a DataFrame in a fresh DuckDB connection and return the connection."""
     import duckdb
@@ -458,6 +709,6 @@ if __name__ == "__main__":
     print("  - Automatic CRS detection and transformation")
     print("=" * 70)
     print("\nStarting web server...")
-    print("Open http://127.0.0.1:5050 in your browser")
+    print("Open http://10.149.201.62:5050/ in your browser")
     print("=" * 70) #http://10.149.201.62/ #127.0.0.1
     app.run(debug=True, host="10.149.201.62", port=5050)
