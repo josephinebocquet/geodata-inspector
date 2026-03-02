@@ -114,12 +114,14 @@
         
         /* Batch navigator */
         .batch-navigator {
-            display: none; margin-top: 1.2rem;
-            border-top: 1px solid #eceff1; padding-top: 1rem;
+            display: none;
+            width: 100%;
+            margin-bottom: 1rem;
         }
+        .content-wrapper { flex-wrap: wrap; }
         .batch-nav-header {
             display: flex; align-items: center; justify-content: space-between;
-            margin-bottom: 0.8rem; gap: 0.5rem;
+            gap: 0.5rem;
         }
         .batch-nav-title {
             font-size: 0.9rem; color: #455a64; font-weight: 500;
@@ -279,14 +281,6 @@
                         <button class="batch-download-btn" id="batchDownloadExcelBtn" onclick="downloadBatchExcel()" style="display:none; margin-top:0; background:#1565c0;">
                             ⬇ Télécharger en Excel
                         </button>
-                    <div class="batch-navigator" id="batchNavigator">
-                    <div class="batch-nav-header">
-                        <button class="batch-nav-btn" id="batchNavPrev" onclick="batchNavigate(-1)">&#8592;</button>
-                        <div class="batch-nav-title" id="batchNavTitle">—</div>
-                        <button class="batch-nav-btn" id="batchNavNext" onclick="batchNavigate(1)">&#8594;</button>
-                    </div>
-                    <div class="batch-nav-counter" id="batchNavCounter"></div>
-                </div>
                     </div>
                 </div>
                 <p class="formats">Formats : dossier ou un ZIP de plusieurs fichiers</p>
@@ -304,6 +298,14 @@
         </div>
 
         <div class="content-wrapper">
+            <div class="batch-navigator" id="batchNavigator">
+                <div class="batch-nav-header">
+                    <button class="batch-nav-btn" id="batchNavPrev" onclick="batchNavigate(-1)">&#8592;</button>
+                    <div class="batch-nav-title" id="batchNavTitle">—</div>
+                    <button class="batch-nav-btn" id="batchNavNext" onclick="batchNavigate(1)">&#8594;</button>
+                </div>
+                <div class="batch-nav-counter" id="batchNavCounter"></div>
+            </div>
             <div class="results" id="results">
                 <h2>Résultats</h2>
                 <table>
@@ -752,13 +754,16 @@ const exportSection = document.getElementById('exportSection');
             const formData = new FormData();
             let count = 0;
             for (const file of files) {
-                const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
-                if (file.name.startsWith('._')) continue;
+                const name = file.name;
+                const ext = name.substring(name.lastIndexOf('.')).toLowerCase();
+                // Skip hidden, system, and config files
+                if (name.startsWith('.') || name.startsWith('._') || name.startsWith('__')) continue;
+                if (name.includes('.local.') || name.includes('.config.')) continue;
                 if (PRIMARY.includes(ext)) {
                     formData.append('files', file);
                     count++;
                 } else if (SIDECAR.includes(ext)) {
-                    formData.append('files', file); // upload but don't count
+                    formData.append('files', file);
                 }
             }
             if (count === 0) {
@@ -806,22 +811,49 @@ const exportSection = document.getElementById('exportSection');
                         : s.finished
                             ? `✓ Terminé : ${s.done} fichiers traités`
                             : 'En attente...';
+
+                // Stream logs into the main log panel
+                if (s.logs && s.logs.length > 0) {
+                    if (!logsContent.classList.contains('show')) {
+                        logsContent.classList.add('show');
+                        logsToggle.textContent = 'Masquer les logs';
+                    }
+                    const currentCount = logsContent.querySelectorAll('.log-entry').length;
+                    s.logs.slice(currentCount).forEach(line => addLog(line, 'info'));
+                }
+
                 if (s.errors.length > 0) {
                     document.getElementById('batchErrors').innerHTML =
                         '⚠ Erreurs :<br>' + s.errors.join('<br>');
                 }
+                // Show navigator as soon as first result is ready
+                if (s.done >= 1 && document.getElementById('batchNavigator').style.display === 'none') {
+                    batchCurrentIndex = 0;
+                    batchTotalResults = s.total;
+                    document.getElementById('batchNavigator').style.display = 'block';
+                    loadBatchResult(0);
+                }
+
+                // Update total as more results come in
+                if (s.done > 0) {
+                    batchTotalResults = s.done;
+                    document.getElementById('batchNavCounter').textContent =
+                        `${batchCurrentIndex + 1} / ${s.done}${s.running ? ' (en cours...)' : ''}`;
+                    document.getElementById('batchNavNext').disabled =
+                        batchCurrentIndex >= s.done - 1;
+                }
+
                 if (s.finished) {
                     clearInterval(batchPollInterval);
                     setBatchBtnsDisabled(false);
                     if (s.has_output) {
                         document.getElementById('batchDownloadBtn').style.display = 'inline-block';
                         document.getElementById('batchDownloadExcelBtn').style.display = 'inline-block';
-                        // Show navigator and load first result
-                        batchCurrentIndex = 0;
-                        batchTotalResults = s.total;
-                        document.getElementById('batchNavigator').style.display = 'block';
-                        loadBatchResult(0);
                     }
+                    // Final update of total
+                    batchTotalResults = s.total;
+                    document.getElementById('batchNavNext').disabled =
+                        batchCurrentIndex >= s.total - 1;
                 }
             } catch(e) {
                 clearInterval(batchPollInterval);
@@ -861,14 +893,32 @@ const exportSection = document.getElementById('exportSection');
                 displayResults(data.summary);
 
                 // Show map if available — reset first
-                mapContainer.style.display = 'none';
+                // Handle map
                 if (map) { map.remove(); map = null; }
-                document.getElementById('mapNote').style.display = 'none';
+                if (data.map) {
+                    document.getElementById('mapNote').style.display = 'block';
+                    displayMap(data.map);
+                } else {
+                    mapContainer.style.display = 'block';
+                    mapDiv.style.display = 'none';
+                    noMapData.style.display = 'flex';
+                    document.getElementById('mapNote').style.display = 'none';
+                }
 
-                // Show preview/export sections
+                // Show export section, disabled if no geo data
+                const exportSection = document.getElementById('exportSection');
+                exportSection.style.display = 'block';
+                const hasGeo = data.map !== null;
+                exportSection.querySelectorAll('.export-btn').forEach(btn => {
+                    btn.disabled = !hasGeo;
+                    btn.style.opacity = hasGeo ? '1' : '0.4';
+                    btn.style.cursor = hasGeo ? 'pointer' : 'not-allowed';
+                    btn.title = hasGeo ? '' : 'Aucune donnée géographique détectée';
+                });
+
+                // Hide preview (no file loaded for single-file preview)
                 previewSection.style.display = 'none';
                 previewTableWrap.innerHTML = '';
-                document.getElementById('exportSection').style.display = 'none';
 
                 // Scroll to results
                 document.getElementById('results').scrollIntoView({ behavior: 'smooth' });

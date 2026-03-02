@@ -40,6 +40,8 @@ batch_state = {
     "done": 0,
     "current": "",
     "errors": [],
+    "logs": [],
+    "file_paths": {},
     "output_path": None,
 }
 batch_executor = ThreadPoolExecutor(max_workers=1)
@@ -400,8 +402,11 @@ def batch_upload():
         "done": 0,
         "current": "",
         "errors": [],
+        "logs": [],        
         "output_path": None,
     })
+    batch_state["file_paths"] = {os.path.basename(f): f for f in files_to_process}
+
 
     output_csv = os.path.join(PREVIEW_DIR, f"batch_results_{os.path.basename(zip_path)}.csv")
 
@@ -414,28 +419,30 @@ def batch_upload():
                     if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
                         inspector.summary_rows.clear()
                     inspector.last_gdf = None
-
-                    inspector.inspect_file(filepath, gdf_reference)
-
+                    log_capture = StringIO()
+                    with redirect_stdout(log_capture):
+                        inspector.inspect_file(filepath, gdf_reference)
+                    captured = log_capture.getvalue()
+                    if captured:
+                        for line in captured.splitlines():
+                            if line.strip():
+                                batch_state["logs"].append(f"[{os.path.basename(filepath)}] {line}")
                     if inspector.summary_rows:
                         all_rows.append(dict(inspector.summary_rows[-1]))
+                        # Write CSV immediately after each file
+                        df_out = pd.DataFrame(all_rows)
+                        for col in df_out.columns:
+                            if df_out[col].dtype == object:
+                                df_out[col] = df_out[col].apply(
+                                    lambda v: json.dumps(v, ensure_ascii=False)
+                                    if isinstance(v, dict) else v
+                                )
+                        df_out.to_csv(output_csv, index=False, encoding="utf-8-sig")
+                        batch_state["output_path"] = output_csv
                 except Exception as e:
                     batch_state["errors"].append(f"{os.path.basename(filepath)}: {str(e)}")
                 finally:
                     batch_state["done"] += 1
-
-            # Write CSV output
-            if all_rows:
-                df_out = pd.DataFrame(all_rows)
-                # Flatten dict columns to JSON strings for CSV
-                for col in df_out.columns:
-                    if df_out[col].dtype == object:
-                        df_out[col] = df_out[col].apply(
-                            lambda v: json.dumps(v, ensure_ascii=False)
-                            if isinstance(v, dict) else v
-                        )
-                df_out.to_csv(output_csv, index=False, encoding="utf-8-sig")
-                batch_state["output_path"] = output_csv
 
         except Exception as e:
             batch_state["errors"].append(f"Fatal: {str(e)}")
@@ -455,14 +462,15 @@ def batch_upload():
 def batch_status():
     """Poll batch job progress."""
     return jsonify({
-        "running":  batch_state["running"],
-        "total":    batch_state["total"],
-        "done":     batch_state["done"],
-        "current":  batch_state["current"],
-        "errors":   batch_state["errors"],
-        "finished": not batch_state["running"] and batch_state["done"] > 0,
-        "has_output": batch_state["output_path"] is not None,
-    })
+            "running":    batch_state["running"],
+            "total":      batch_state["total"],
+            "done":       batch_state["done"],
+            "current":    batch_state["current"],
+            "errors":     batch_state["errors"],
+            "logs":       batch_state["logs"],
+            "finished":   not batch_state["running"] and batch_state["done"] > 0,
+            "has_output": batch_state["output_path"] is not None,
+        })
 
 
 @app.route("/batch/download", methods=["GET"])
@@ -493,7 +501,7 @@ def batch_download_excel():
 
 @app.route("/batch/result/<int:index>", methods=["GET"])
 def batch_result(index):
-    """Return a single batch result by index for display in the UI."""
+    """Return a single batch result by index, re-inspecting for map data."""
     path = batch_state.get("output_path")
     if not path or not os.path.exists(path):
         return jsonify({"error": "No batch results available."}), 404
@@ -504,7 +512,7 @@ def batch_result(index):
 
         row = df.iloc[index].to_dict()
 
-        # Try to parse JSON strings back to objects for display
+        # Parse JSON strings back to objects
         for k, v in row.items():
             if isinstance(v, str) and v.strip().startswith('{'):
                 try:
@@ -512,20 +520,114 @@ def batch_result(index):
                 except Exception:
                     pass
 
-        # Reorder to match COLUMN_ORDER
         ordered = _reorder_summary(row)
+
+        # Re-inspect to get map data
+        map_data = None
+        filepath = row.get("Chemin", row.get("Nom du fichier", None))
+
+        # Try to find the original file path from batch state
+        original_path = batch_state.get("file_paths", {}).get(
+            row.get("Nom du fichier", ""), None)
+
+        if original_path and os.path.exists(original_path):
+            try:
+                if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
+                    inspector.summary_rows.clear()
+                inspector.last_gdf = None
+                log_capture = StringIO()
+                with redirect_stdout(log_capture):
+                    inspector.inspect_file(original_path, gdf_reference)
+                map_data = _extract_map_data()
+            except Exception:
+                traceback.print_exc()
 
         return jsonify({
             "index": index,
             "total": len(df),
             "filename": row.get("Nom du fichier", f"Fichier {index+1}"),
-            "summary": _make_serializable(ordered)
+            "summary": _make_serializable(ordered),
+            "map": map_data,
         })
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+# @app.route("/batch_dir", methods=["POST"])
+# def batch_dir():
+#     """Accept multiple uploaded files directly (from webkitdirectory picker)."""
+#     files = request.files.getlist("files")
+#     if not files:
+#         return jsonify({"error": "No files received."}), 400
 
+#     if batch_state["running"]:
+#         return jsonify({"error": "A batch job is already running."}), 409
+
+#     # Save all files to a temp dir
+#     tmpdir = tempfile.mkdtemp(prefix="geodata_batchdir_")
+#     saved_paths = []
+#     for f in files:
+#         # Flatten subdirectory structure using underscores to avoid collisions
+#         safe_name = f.filename.replace("\\", "/").lstrip("/").replace("/", "_")
+#         dest = os.path.join(tmpdir, safe_name)
+#         f.save(dest)
+#         saved_paths.append(dest)
+
+#     batch_state.update({
+#         "running": True,
+#         "total": len(saved_paths),
+#         "done": 0,
+#         "current": "",
+#         "errors": [],
+#         "logs": [],        
+#         "output_path": None,
+#     })
+#     batch_state["file_paths"] = {os.path.basename(f): f for f in saved_paths}
+
+
+#     output_csv = os.path.join(PREVIEW_DIR, "batch_dir_results.csv")
+
+#     def run_batch():
+#         try:
+#             all_rows = []
+#             for filepath in saved_paths:
+#                 batch_state["current"] = os.path.basename(filepath)
+#                 try:
+#                     if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
+#                         inspector.summary_rows.clear()
+#                     inspector.last_gdf = None
+#                     log_capture = StringIO()
+#                     with redirect_stdout(log_capture):
+#                         inspector.inspect_file(filepath, gdf_reference)
+#                     captured = log_capture.getvalue()
+#                     if captured:
+#                         for line in captured.splitlines():
+#                             if line.strip():
+#                                 batch_state["logs"].append(f"[{os.path.basename(filepath)}] {line}")
+#                     if inspector.summary_rows:
+#                         all_rows.append(dict(inspector.summary_rows[-1]))
+#                         # Write CSV immediately after each file
+#                         df_out = pd.DataFrame(all_rows)
+#                         for col in df_out.columns:
+#                             if df_out[col].dtype == object:
+#                                 df_out[col] = df_out[col].apply(
+#                                     lambda v: json.dumps(v, ensure_ascii=False)
+#                                     if isinstance(v, dict) else v
+#                                 )
+#                         df_out.to_csv(output_csv, index=False, encoding="utf-8-sig")
+#                         batch_state["output_path"] = output_csv
+#                 except Exception as e:
+#                     batch_state["errors"].append(f"{os.path.basename(filepath)}: {str(e)}")
+#                 finally:
+#                     batch_state["done"] += 1
+#         except Exception as e:
+#             batch_state["errors"].append(f"Fatal: {str(e)}")
+#         finally:
+#             batch_state["running"] = False
+#             shutil.rmtree(tmpdir, ignore_errors=True)
+
+#     batch_executor.submit(run_batch)
+#     return jsonify({"message": f"Batch started: {len(saved_paths)} files.", "total": len(saved_paths)})   
 @app.route("/batch_dir", methods=["POST"])
 def batch_dir():
     """Accept multiple uploaded files directly (from webkitdirectory picker)."""
@@ -536,15 +638,33 @@ def batch_dir():
     if batch_state["running"]:
         return jsonify({"error": "A batch job is already running."}), 409
 
-    # Save all files to a temp dir
+    PRIMARY_EXTS = {".csv", ".txt", ".xlsx", ".geojson", ".json", ".shp", ".gpkg", ".zip"}
+    SIDECAR_EXTS = {".shx", ".dbf", ".prj", ".cpg", ".qpj"}
+
+    # Save all files to a temp dir, skipping hidden/config files
     tmpdir = tempfile.mkdtemp(prefix="geodata_batchdir_")
     saved_paths = []
     for f in files:
-        # Flatten subdirectory structure using underscores to avoid collisions
+        basename = os.path.basename(f.filename)
+        ext = os.path.splitext(basename)[1].lower()
+
+        # Skip hidden, system and config files
+        if basename.startswith('.') or basename.startswith('__'):
+            continue
+        if any(pat in basename for pat in ['.local.', '.config.', '.settings.']):
+            continue
+
         safe_name = f.filename.replace("\\", "/").lstrip("/").replace("/", "_")
         dest = os.path.join(tmpdir, safe_name)
         f.save(dest)
-        saved_paths.append(dest)
+
+        # Only add primary data files to processing list (not sidecars)
+        if ext in PRIMARY_EXTS:
+            saved_paths.append(dest)
+
+    if not saved_paths:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return jsonify({"error": "Aucun fichier de données compatible trouvé."}), 400
 
     batch_state.update({
         "running": True,
@@ -552,8 +672,10 @@ def batch_dir():
         "done": 0,
         "current": "",
         "errors": [],
+        "logs": [],
         "output_path": None,
     })
+    batch_state["file_paths"] = {os.path.basename(f): f for f in saved_paths}
 
     output_csv = os.path.join(PREVIEW_DIR, "batch_dir_results.csv")
 
@@ -566,24 +688,31 @@ def batch_dir():
                     if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
                         inspector.summary_rows.clear()
                     inspector.last_gdf = None
-                    inspector.inspect_file(filepath, gdf_reference)
+                    log_capture = StringIO()
+                    with redirect_stdout(log_capture):
+                        inspector.inspect_file(filepath, gdf_reference)
+                    captured = log_capture.getvalue()
+                    if captured:
+                        for line in captured.splitlines():
+                            if line.strip():
+                                batch_state["logs"].append(
+                                    f"[{os.path.basename(filepath)}] {line}")
                     if inspector.summary_rows:
                         all_rows.append(dict(inspector.summary_rows[-1]))
+                        # Write CSV immediately after each file
+                        df_out = pd.DataFrame(all_rows)
+                        for col in df_out.columns:
+                            if df_out[col].dtype == object:
+                                df_out[col] = df_out[col].apply(
+                                    lambda v: json.dumps(v, ensure_ascii=False)
+                                    if isinstance(v, dict) else v
+                                )
+                        df_out.to_csv(output_csv, index=False, encoding="utf-8-sig")
+                        batch_state["output_path"] = output_csv
                 except Exception as e:
                     batch_state["errors"].append(f"{os.path.basename(filepath)}: {str(e)}")
                 finally:
                     batch_state["done"] += 1
-
-            if all_rows:
-                df_out = pd.DataFrame(all_rows)
-                for col in df_out.columns:
-                    if df_out[col].dtype == object:
-                        df_out[col] = df_out[col].apply(
-                            lambda v: json.dumps(v, ensure_ascii=False)
-                            if isinstance(v, dict) else v
-                        )
-                df_out.to_csv(output_csv, index=False, encoding="utf-8-sig")
-                batch_state["output_path"] = output_csv
         except Exception as e:
             batch_state["errors"].append(f"Fatal: {str(e)}")
         finally:
@@ -591,8 +720,10 @@ def batch_dir():
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     batch_executor.submit(run_batch)
-    return jsonify({"message": f"Batch started: {len(saved_paths)} files.", "total": len(saved_paths)})   
-    
+    return jsonify({
+        "message": f"Batch started: {len(saved_paths)} files.",
+        "total": len(saved_paths)
+    })
 def _df_to_duckdb(df):
     """Register a DataFrame in a fresh DuckDB connection and return the connection."""
     import duckdb
