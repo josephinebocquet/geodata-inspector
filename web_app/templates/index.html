@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="{{ UI.html_lang }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Geodata Inspector</title>
+    <title>{{ UI.page_title }}</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -235,9 +235,27 @@
             .results, .map-container { width: 100%; }
             #map { height: 400px; }
         }
+        /* Language switcher */
+        .lang-switcher {
+            position: fixed; top: 1rem; right: 1rem; z-index: 1000;
+        }
+        .lang-select {
+            padding: 0.35rem 0.7rem; border: 1px solid #b0bec5;
+            border-radius: 4px; background: #fff; cursor: pointer;
+            font-size: 0.9rem; color: #455a64;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .lang-select:hover { border-color: #1976d2; }
+        .lang-select:focus { outline: none; border-color: #1976d2; }
     </style>
 </head>
 <body>
+    <div class="lang-switcher">
+        <select class="lang-select" onchange="switchLanguage(this.value)">
+            <option value="fr" {% if UI.html_lang == 'fr' %}selected{% endif %}>FR</option>
+            <option value="en" {% if UI.html_lang == 'en' %}selected{% endif %}>EN</option>
+        </select>
+    </div>
     <div class="container">
         <h1>Geodata Inspector</h1>
 
@@ -246,9 +264,9 @@
 
             <!-- Left: single file -->
             <div class="upload-panel">
-                <p>Glissez-d&eacute;posez un fichier ici</p>
-                <button class="upload-btn" id="browseBtn">Parcourir</button>
-                <button class="clear-btn" id="clearBtn">Effacer</button>
+                <p>{{ UI.drop_prompt }}</p>
+                <button class="upload-btn" id="browseBtn">{{ UI.browse_btn }}</button>
+                <button class="clear-btn" id="clearBtn">{{ UI.clear_btn }}</button>
                 <input type="file" id="fileInput" multiple
                     accept=".csv,.txt,.xlsx,.geojson,.json,.shp,.gpkg,.zip,.shx,.dbf,.prj,.cpg">
                 <p class="formats">Formats : CSV, TXT, XLSX, GeoJSON, JSON, SHP, GPKG, ZIP</p>
@@ -261,29 +279,29 @@
             <!-- Right: batch -->
             <div class="batch-panel">
                 <!-- test format -->                
-                <p>Analyse tous les fichiers d'un dossier et génère un tableur csv récapitulatif</p>
+                <p>{{ UI.batch_desc }}</p>
                 <input type="file" id="batchZipInput" accept=".zip" style="display:none">
                 <input type="file" id="batchDirInput" webkitdirectory multiple style="display:none">
                 <div style="display:flex; gap:0.5rem; justify-content:center; flex-wrap:wrap;">
-                    <button class="batch-btn" id="batchZipBtn">📦 ZIP</button>
-                    <button class="batch-btn" id="batchDirBtn">📂 Dossier</button>
+                    <button class="batch-btn" id="batchZipBtn">{{ UI.batch_zip_btn }}</button>
+                    <button class="batch-btn" id="batchDirBtn">{{ UI.batch_dir_btn }}</button>
                 </div>
                 <div class="batch-progress" id="batchProgress">
                     <div class="progress-bar-wrap">
                         <div class="progress-bar" id="progressBar"></div>
                     </div>
-                    <div class="batch-status-text" id="batchStatusText">En attente...</div>
+                    <div class="batch-status-text" id="batchStatusText">{{ UI.batch_waiting }}</div>
                     <div class="batch-errors" id="batchErrors"></div>
                     <div style="display:flex; gap:0.5rem; justify-content:center; flex-wrap:wrap; margin-top:0.8rem;">
                         <button class="batch-download-btn" id="batchDownloadBtn" onclick="downloadBatchResults()" style="display:none; margin-top:0;">
-                            ⬇ Télécharger en CSV
+                           {{ UI.batch_download_csv }}
                         </button>
                         <button class="batch-download-btn" id="batchDownloadExcelBtn" onclick="downloadBatchExcel()" style="display:none; margin-top:0; background:#1565c0;">
-                            ⬇ Télécharger en Excel
+                           {{ UI.batch_download_excel }}
                         </button>
                     </div>
                 </div>
-                <p class="formats">Formats : dossier ou un ZIP de plusieurs fichiers</p>
+                <p class="formats">{{ UI.formats_batch }}</p>
 
             </div>
         </div>
@@ -292,7 +310,7 @@
 
         <div class="logs-section">
             <div class="logs-header">
-                <button class="logs-toggle" id="logsToggle">Afficher les logs</button>
+                <button class="logs-toggle" id="logsToggle">{{ UI.show_logs }}</button>
             </div>
             <div class="logs-content" id="logsContent"></div>
         </div>
@@ -307,18 +325,18 @@
                 <div class="batch-nav-counter" id="batchNavCounter"></div>
             </div>
             <div class="results" id="results">
-                <h2>Résultats</h2>
+                <h2>{{ UI.results_title }}</h2>
                 <table>
                     <tbody id="resultsBody"></tbody>
                 </table>
                 <div class="preview-section" id="previewSection">
                     <button class="preview-btn" id="previewBtn" onclick="loadPreview()">
-                        👁 Aperçu des données (10 lignes)
+                       {{ UI.preview_btn }}
                     </button>
                     <div class="preview-table-wrap" id="previewTableWrap"></div>
                 </div>
                 <div class="export-section" id="exportSection">
-                    <p class="export-label">⬇ Exporter le dataset complet en données géographiques :</p>
+                    <p class="export-label">{{ UI.export_label }}</p>
                     <div class="export-btns">
                         <button class="export-btn geojson" onclick="exportData('geojson')">GeoJSON</button>
                         <button class="export-btn gpkg"    onclick="exportData('gpkg')">GeoPackage</button>
@@ -330,13 +348,13 @@
             </div>
 
             <div class="map-container" id="mapContainer">
-                <h2>Carte</h2>
+                <h2>{{ UI.map_title }}</h2>
                 <div id="map"></div>
                 <div id="noMapData" class="no-map-data" style="display: none;">
-                    Pas de données géographiques
+                   {{ UI.no_geo_data }}
                 </div>
                 <p id="mapNote" style="display:none; margin-top:0.5rem; font-size:0.8rem; color:#90a4ae; text-align:left;">
-                    ℹ️ Aperçu cartographique limité à 1 000 enregistrements. Utilisez l'export pour obtenir le dataset complet.
+                    {{ UI.map_note }}
                 </p>
             </div>
         </div>
@@ -344,6 +362,7 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
+        const UI = {{ UI | tojson }};
         const dropZone       = document.getElementById('dropZone');
         const fileInput      = document.getElementById('fileInput');
         const browseBtn      = document.getElementById('browseBtn');
@@ -374,7 +393,7 @@
             status.textContent = '';
             clearLogs();
             logsContent.classList.remove('show');
-            logsToggle.textContent = 'Afficher les logs';
+            logsToggle.textContent = UI.show_logs;
             clearBtn.style.display = 'none';
             document.getElementById('mapNote').style.display = 'none';
             previewSection.style.display = 'none';
@@ -393,9 +412,14 @@
         logsToggle.addEventListener('click', () => {
             logsContent.classList.toggle('show');
             logsToggle.textContent = logsContent.classList.contains('show')
-                ? 'Masquer les logs' : 'Afficher les logs';
+                ? UI.hide_logs : UI.show_logs;
         });
 
+        async function switchLanguage(lang) {
+            const resp = await fetch(`/set_language/${lang}`, { method: 'POST' });
+            const data = await resp.json();
+            if (data.ok) window.location.reload();
+        }
         function addLog(message, type = 'info') {
             const entry = document.createElement('div');
             entry.className = `log-entry ${type}`;
@@ -449,14 +473,14 @@
             clearLogs();
             if (!logsContent.classList.contains('show')) {
                 logsContent.classList.add('show');
-                logsToggle.textContent = 'Masquer les logs';
+                logsToggle.textContent = UI.hide_logs;;
             }
             if (isLargeFile) {
                 status.className = 'status warning';
-                status.textContent = `Fichier volumineux (${sizeMB.toFixed(1)} MB) - analyse en cours, peut prendre jusqu'à une minute...`;
+                status.textContent = UI.status_large_file.replace('{size}', sizeMB.toFixed(1));
             } else {
                 status.className = 'status loading';
-                status.textContent = 'Analyse en cours...';
+                status.textContent = UI.status_analysing;
             }
             results.style.display = 'none';
             mapContainer.style.display = 'none';
@@ -464,7 +488,7 @@
             noMapData.style.display = 'none';
             browseBtn.disabled = true;
 
-            addLog(`Fichier sélectionné: ${file.name} (${(file.size / 1024).toFixed(1)} Ko)`);
+            addLog(UI.log_file_selected.replace('{name}', file.name).replace('{size}', (file.size / 1024).toFixed(1)));
 
             const formData = new FormData();
             formData.append('file', file);
@@ -478,15 +502,15 @@
             }
 
             try {
-                addLog('Envoi du fichier au serveur...');
+                addLog(UI.log_sending);
                 const resp = await fetch('/upload', { method: 'POST', body: formData });
-                addLog('Réception de la réponse...');
+                addLog(UI.log_receiving);
                 const data = await resp.json();
 
                 if (data.error) {
                     status.className = 'status error';
                     status.textContent = data.error;
-                    addLog(`Erreur: ${data.error}`, 'error');
+                    addLog(UI.log_error.replace('{msg}', data.error));
                 } else {
                     status.className = 'status';
                     status.textContent = '';
@@ -494,40 +518,40 @@
                         data.logs.forEach(log => addLog(log, 'info'));
                     }
                     if (data.warning) { addLog(data.warning, 'error'); }
-                    addLog('Analyse terminée avec succès', 'success');
+                    addLog(UI.log_success);
                     const nbLignes  = data.summary.find(([k]) => k === 'Nb lignes')?.[1]  ?? 'N/A';
                     const nbColonnes = data.summary.find(([k]) => k === 'Nb colonnes')?.[1] ?? 'N/A';
-                    addLog(`Lignes: ${nbLignes}, Colonnes: ${nbColonnes}`);
+                    addLog(UI.log_lines.replace('{rows}', nbLignes).replace('{cols}', nbColonnes));
 
                     displayResults(data.summary);
                     clearBtn.style.display = 'inline-block';
                     previewSection.style.display = 'block';
                     previewTableWrap.innerHTML = '';
-                    previewBtn.textContent = '👁 Aperçu des données (10 lignes)';
-const exportSection = document.getElementById('exportSection');
+                    previewBtn.textContent = UI.preview_btn;
+                    const exportSection = document.getElementById('exportSection');
                     exportSection.style.display = 'block';
                     const hasGeo = data.map !== null;
                     exportSection.querySelectorAll('.export-btn').forEach(btn => {
                         btn.disabled = !hasGeo;
                         btn.style.opacity = hasGeo ? '1' : '0.4';
                         btn.style.cursor = hasGeo ? 'pointer' : 'not-allowed';
-                        btn.title = hasGeo ? '' : 'Aucune donnée géographique détectée';
+                        btn.title = hasGeo ? '' : UI.export_no_geo;
                     });
                     if (data.map) {
-                        addLog('Génération de la carte...', 'success');
+                        addLog(UI.log_map_generating);
                         document.getElementById('mapNote').style.display = 'block';
                         displayMap(data.map);
                     } else {
                         mapContainer.style.display = 'block';
                         mapDiv.style.display = 'none';
                         noMapData.style.display = 'flex';
-                        addLog('Pas de données géographiques pour la carte');
+                        addLog(UI.log_no_map);
                     }
                 }
             } catch (err) {
                 status.className = 'status error';
                 status.textContent = 'Erreur de connexion : ' + err.message;
-                addLog(`Erreur de connexion: ${err.message}`, 'error');
+                addLog(UI.status_conn_error.replace('{msg}', err.message), 'error');
             } finally {
                 browseBtn.disabled = false;
             }
@@ -542,11 +566,12 @@ const exportSection = document.getElementById('exportSection');
         }
 
         function renderNestedTable(data) {
-            if (!data || data.length === 0) return '<em>Aucune donnée</em>';
+            if (!data || data.length === 0) return `<em>${UI.no_data}</em>`;
             const headers = Object.keys(data[0]);
             let html = '<table class="nested-table"><thead><tr>';
             headers.forEach(h => {
-                let displayHeader = h === 'Valeurs manquantes' ? 'Valeurs<br>manquantes' : h;
+                // let displayHeader = h === 'Valeurs manquantes' ? 'Valeurs<br>manquantes' : h;
+                let displayHeader = h.includes(' ') ? h.replace(' ', '<br>') : h;
                 html += `<th>${displayHeader}</th>`;
             });
             html += '</tr></thead><tbody>';
@@ -576,10 +601,10 @@ const exportSection = document.getElementById('exportSection');
         async function loadPreview() {
             if (previewTableWrap.innerHTML !== '') {
                 previewTableWrap.innerHTML = '';
-                previewBtn.textContent = '👁 Aperçu des données (10 lignes)';
+                previewBtn.textContent = UI.preview_btn;
                 return;
             }
-            previewBtn.textContent = '⏳ Chargement...';
+            previewBtn.textContent = UI.preview_loading;
             previewBtn.disabled = true;
             previewTableWrap.innerHTML = '';
 
@@ -606,7 +631,7 @@ const exportSection = document.getElementById('exportSection');
             } catch(e) {
                 previewTableWrap.innerHTML = `<p style="color:#c62828; margin-top:0.5rem">Erreur: ${e.message}</p>`;
             } finally {
-                previewBtn.textContent = '👁 Aperçu des données (10 lignes)';
+                previewBtn.textContent = UI.preview_btn;
                 previewBtn.disabled = false;
             }
         }
@@ -614,7 +639,7 @@ const exportSection = document.getElementById('exportSection');
         // ── Export ────────────────────────────────────────────────────────
         async function exportData(fmt) {
             const exportStatus = document.getElementById('exportStatus');
-            exportStatus.textContent = '⏳ Re-lecture et conversion du fichier complet, merci de patienter...';
+            exportStatus.textContent = UI.export_loading;
             try {
                 const resp = await fetch(`/export?format=${fmt}`);
                 if (!resp.ok) {
@@ -632,7 +657,7 @@ const exportSection = document.getElementById('exportSection');
                 a.click();
                 document.body.removeChild(a);
                 URL.revokeObjectURL(url);
-                exportStatus.textContent = `✓ Export ${fmt.toUpperCase()} téléchargé.`;
+                exportStatus.textContent = UI.export_done.replace('{fmt}', fmt.toUpperCase());
                 setTimeout(() => { exportStatus.textContent = ''; }, 4000);
             } catch(e) {
                 exportStatus.textContent = `Erreur : ${e.message}`;
@@ -686,13 +711,13 @@ const exportSection = document.getElementById('exportSection');
         function setBatchBtnsDisabled(disabled) {
             batchZipBtn.disabled = disabled;
             batchDirBtn.disabled = disabled;
-            batchZipBtn.textContent = disabled ? '⏳' : '📦 ZIP';
-            batchDirBtn.textContent = disabled ? '⏳' : '📂 Dossier';
+            batchZipBtn.textContent = disabled ? '⏳' : UI.batch_zip_btn;
+            batchDirBtn.textContent = disabled ? '⏳' : UI.batch_dir_btn;
         }
 
         function resetBatchProgress() {
             document.getElementById('batchProgress').style.display = 'block';
-            document.getElementById('batchStatusText').textContent = 'Envoi en cours...';
+            document.getElementById('batchStatusText').textContent = UI.batch_sending;
             document.getElementById('progressBar').style.width = '0%';
             document.getElementById('batchErrors').textContent = '';
             document.getElementById('batchDownloadBtn').style.display = 'none';
@@ -714,7 +739,7 @@ const exportSection = document.getElementById('exportSection');
                     return;
                 }
                 document.getElementById('batchStatusText').textContent =
-                    `Démarré : ${data.total} fichiers à traiter...`;
+                    UI.batch_started.replace('{total}', data.total);
                 batchPollInterval = setInterval(pollBatchStatus, 1500);
             } catch(e) {
                 document.getElementById('batchStatusText').textContent = `Erreur : ${e.message}`;
@@ -768,12 +793,12 @@ const exportSection = document.getElementById('exportSection');
             }
             if (count === 0) {
                 document.getElementById('batchStatusText').textContent =
-                    'Aucun fichier compatible trouvé dans ce dossier.';
+                    UI.batch_no_files;
                 setBatchBtnsDisabled(false);
                 return;
             }
             document.getElementById('batchStatusText').textContent =
-                `${count} fichier(s) détecté(s), envoi en cours...`;
+                UI.batch_detected.replace('{count}', count);
             try {
                 const resp = await fetch('/batch_dir', { method: 'POST', body: formData });
                 const contentType = resp.headers.get('content-type') || '';
@@ -791,7 +816,7 @@ const exportSection = document.getElementById('exportSection');
                     return;
                 }
                 document.getElementById('batchStatusText').textContent =
-                    `Démarré : ${data.total} fichiers à traiter...`;
+                    UI.batch_started.replace('{total}', data.total);
                 batchPollInterval = setInterval(pollBatchStatus, 1500);
             } catch(e) {
                 document.getElementById('batchStatusText').textContent = `Erreur : ${e.message}`;
@@ -807,10 +832,10 @@ const exportSection = document.getElementById('exportSection');
                 document.getElementById('progressBar').style.width = pct + '%';
                 document.getElementById('batchStatusText').textContent =
                     s.running
-                        ? `Traitement : ${s.done}/${s.total} — ${s.current}`
+                        ? UI.batch_processing.replace('{done}',s.done).replace('{total}',s.total).replace('{current}',s.current)
                         : s.finished
-                            ? `✓ Terminé : ${s.done} fichiers traités`
-                            : 'En attente...';
+                            ? UI.batch_finished.replace('{done}', s.done)
+                            : UI.batch_waiting;
 
                 // Stream logs into the main log panel
                 if (s.logs && s.logs.length > 0) {
@@ -824,7 +849,7 @@ const exportSection = document.getElementById('exportSection');
 
                 if (s.errors.length > 0) {
                     document.getElementById('batchErrors').innerHTML =
-                        '⚠ Erreurs :<br>' + s.errors.join('<br>');
+                        UI.batch_errors_header + '<br>' + s.errors.join('<br>');
                 }
                 // Show navigator as soon as first result is ready
                 if (s.done >= 1 && document.getElementById('batchNavigator').style.display === 'none') {
@@ -838,7 +863,7 @@ const exportSection = document.getElementById('exportSection');
                 if (s.done > 0) {
                     batchTotalResults = s.done;
                     document.getElementById('batchNavCounter').textContent =
-                        `${batchCurrentIndex + 1} / ${s.done}${s.running ? ' (en cours...)' : ''}`;
+                        s.running ? UI.batch_nav_counter_live.replace('{current}', batchCurrentIndex+1).replace('{total}', s.done) : UI.batch_nav_counter.replace('{current}', batchCurrentIndex+1).replace('{total}', s.done);
                     document.getElementById('batchNavNext').disabled =
                         batchCurrentIndex >= s.done - 1;
                 }
@@ -913,8 +938,7 @@ const exportSection = document.getElementById('exportSection');
                     btn.disabled = !hasGeo;
                     btn.style.opacity = hasGeo ? '1' : '0.4';
                     btn.style.cursor = hasGeo ? 'pointer' : 'not-allowed';
-                    btn.title = hasGeo ? '' : 'Aucune donnée géographique détectée';
-                });
+                    btn.title = hasGeo ? '' : UI.export_no_geo;                });
 
                 // Hide preview (no file loaded for single-file preview)
                 previewSection.style.display = 'none';

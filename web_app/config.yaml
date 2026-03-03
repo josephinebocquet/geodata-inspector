@@ -1,0 +1,9 @@
+language: en
+localisation:
+  country: france
+  custom_metric_crs: 2154
+  custom_reference_path: ''
+server:
+  debug: false
+  host: 10.149.201.62
+  port: 5050

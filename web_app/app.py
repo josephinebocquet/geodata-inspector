@@ -14,21 +14,37 @@ import numpy as np
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import yaml
+
 # Ajoute la racine du repo au path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-# Ensure this directory is on the path so imports resolve
-# sys.path.insert(0, os.path.dirname(__file__))
 
 # Use DuckDB-optimized inspector for better performance
 import geodata_inspector.core as inspector
+from config import get_config, get_reference_info, get_ui_labels
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "geodata-inspector-secret-key")
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2 GB max upload
 app.config["JSON_SORT_KEYS"] = False  # Preserve column order in JSON responses
 
+# Load configuration
+_cfg = get_config()
+_reference_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "reference_file")
+_ref_info = get_reference_info(_cfg, _reference_dir)
+UI = get_ui_labels(_cfg)
+
+from config import get_config, get_reference_info, get_ui_labels, get_result_key_translations
+RESULT_TRANSLATIONS = get_result_key_translations(_cfg)
+
 # Pre-load the reference geodataframe once at startup
-REFERENCE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "reference_file", "regions.geojson")
-gdf_reference = gpd.read_file(REFERENCE_PATH).to_crs(epsg=2154)
+if _ref_info["available"]:
+    gdf_reference = gpd.read_file(_ref_info["path"]).to_crs(epsg=_ref_info["metric_crs"])
+    print(f"[Config] Reference: {_ref_info['label']}")
+else:
+    print(f"[Config] WARNING: Reference file missing. Coverage metrics disabled.")
+    gdf_reference = None
+    
 
 PREVIEW_DIR = tempfile.mkdtemp(prefix="geodata_preview_")
 last_preview_path = {"path": None, "ext": None}
@@ -43,6 +59,7 @@ batch_state = {
     "logs": [],
     "file_paths": {},
     "output_path": None,
+    "tmpdir": None,
 }
 batch_executor = ThreadPoolExecutor(max_workers=1)
 
@@ -51,7 +68,6 @@ ALLOWED_EXTENSIONS = {".csv", ".txt", ".xlsx", ".geojson", ".json", ".shp", ".gp
 # Define the desired column order for the summary display
 COLUMN_ORDER = [
     # File metadata
-    # "Dossier",
     "Nom du fichier",
     "Taille (Ko)",
     "Date de création du fichier (Y-M-D)",
@@ -107,25 +123,47 @@ def _make_serializable(obj):
     return obj
 
 
-def _reorder_summary(summary):
-    """Reorder summary dictionary to match COLUMN_ORDER and return as list of [key, value] pairs."""
+def _reorder_summary(result):
+    """Reorder summary dict to match COLUMN_ORDER, with translation fallback."""
+    translated_order = [RESULT_TRANSLATIONS.get(k, k) for k in COLUMN_ORDER]
     ordered_pairs = []
-    added_keys = set()
-
-    # Add columns in the defined order
-    for key in COLUMN_ORDER:
-        if key in summary:
-            ordered_pairs.append([key, summary[key]])
-            added_keys.add(key)
-
-    # Add any remaining columns not in COLUMN_ORDER
-    for key, value in summary.items():
-        if key not in added_keys:
-            ordered_pairs.append([key, value])
-
+    result_copy = dict(result)
+    for key in translated_order:
+        if key in result_copy:
+            ordered_pairs.append([key, result_copy.pop(key)])
+    for key, value in result_copy.items():
+        ordered_pairs.append([key, value])
     return ordered_pairs
 
+def _translate_summary(summary, translations):
+    """Translate French result keys to the configured language."""
+    if not translations:
+        return summary
+    return [[translations.get(k, k), v] for k, v in summary]
 
+def _translate_columns_detail(summary, translations):
+    """Translate nested column table headers inside the Colonnes entry."""
+    if not translations:
+        return summary
+    translated = []
+    for k, v in summary:
+        tk = translations.get(k, k)
+        # Translate nested table headers
+        if isinstance(v, dict) and v.get("_table") and v.get("data"):
+            new_data = []
+            for row in v["data"]:
+                new_row = {translations.get(col, col): val for col, val in row.items()}
+                new_data.append(new_row)
+            v = {"_table": True, "data": new_data}
+        translated.append([tk, v])
+    return translated
+def _translate_row_dict(row, translations):
+    """Translate French keys in a summary row dict to the configured language."""
+    if not translations:
+        return row
+    return {translations.get(k, k): v for k, v in row.items()}
+
+    
 def _extract_map_data():
     """
     Extract geographic data for map visualization using the stored GeoDataFrame.
@@ -173,12 +211,33 @@ def _extract_map_data():
         traceback.print_exc()
         return None
 
-
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", UI=UI)
 
-
+@app.route("/set_language/<lang>", methods=["POST"])
+def set_language(lang):
+    if lang not in ("fr", "en"):
+        return jsonify({"ok": False, "error": "Unsupported language"}), 400
+    try:
+        global _cfg, UI, RESULT_TRANSLATIONS
+        _cfg["language"] = lang
+        UI = get_ui_labels(_cfg)
+        RESULT_TRANSLATIONS = get_result_key_translations(_cfg)
+        # Also write to config.yaml so it persists across restarts
+        config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                current = yaml.safe_load(f) or {}
+            current["language"] = lang
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(current, f, allow_unicode=True, default_flow_style=False)
+        return jsonify({"ok": True})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": str(e)}), 500
+        
+    
 @app.route("/upload", methods=["POST"])
 def upload():
     if "file" not in request.files:
@@ -239,11 +298,11 @@ def upload():
         result = inspector.summary_rows[-1]
 
         # Override folder/filename to show the original upload name (not the tmp path)
-        result["Dossier"] = "(uploaded)"
         result["Nom du fichier"] = file.filename
 
         # Reorder the summary to match COLUMN_ORDER
-        ordered_result = _reorder_summary(result)
+        ordered_result = _translate_columns_detail(_reorder_summary(result), RESULT_TRANSLATIONS)
+
 
         # Extract map data from the stored GeoDataFrame
         map_data = _extract_map_data()
@@ -363,6 +422,12 @@ def batch_upload():
     if batch_state["running"]:
         return jsonify({"error": "A batch job is already running. Please wait."}), 409
 
+    # Clean up previous batch tmpdir if it exists
+    old_tmpdir = batch_state.get("tmpdir")
+    if old_tmpdir and os.path.exists(old_tmpdir):
+        shutil.rmtree(old_tmpdir, ignore_errors=True)
+        batch_state["tmpdir"] = None
+        
     tmpdir = tempfile.mkdtemp(prefix="geodata_batch_")
     zip_path = os.path.join(tmpdir, file.filename)
     file.save(zip_path)
@@ -404,6 +469,7 @@ def batch_upload():
         "errors": [],
         "logs": [],        
         "output_path": None,
+        "tmpdir": tmpdir, 
     })
     batch_state["file_paths"] = {os.path.basename(f): f for f in files_to_process}
 
@@ -428,7 +494,8 @@ def batch_upload():
                             if line.strip():
                                 batch_state["logs"].append(f"[{os.path.basename(filepath)}] {line}")
                     if inspector.summary_rows:
-                        all_rows.append(dict(inspector.summary_rows[-1]))
+                        all_rows.append(_translate_row_dict(
+                            dict(inspector.summary_rows[-1]), RESULT_TRANSLATIONS))
                         # Write CSV immediately after each file
                         df_out = pd.DataFrame(all_rows)
                         for col in df_out.columns:
@@ -448,7 +515,6 @@ def batch_upload():
             batch_state["errors"].append(f"Fatal: {str(e)}")
         finally:
             batch_state["running"] = False
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
     batch_executor.submit(run_batch)
 
@@ -520,7 +586,7 @@ def batch_result(index):
                 except Exception:
                     pass
 
-        ordered = _reorder_summary(row)
+        ordered = _translate_columns_detail(_reorder_summary(row), RESULT_TRANSLATIONS)
 
         # Re-inspect to get map data
         map_data = None
@@ -553,81 +619,6 @@ def batch_result(index):
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-# @app.route("/batch_dir", methods=["POST"])
-# def batch_dir():
-#     """Accept multiple uploaded files directly (from webkitdirectory picker)."""
-#     files = request.files.getlist("files")
-#     if not files:
-#         return jsonify({"error": "No files received."}), 400
-
-#     if batch_state["running"]:
-#         return jsonify({"error": "A batch job is already running."}), 409
-
-#     # Save all files to a temp dir
-#     tmpdir = tempfile.mkdtemp(prefix="geodata_batchdir_")
-#     saved_paths = []
-#     for f in files:
-#         # Flatten subdirectory structure using underscores to avoid collisions
-#         safe_name = f.filename.replace("\\", "/").lstrip("/").replace("/", "_")
-#         dest = os.path.join(tmpdir, safe_name)
-#         f.save(dest)
-#         saved_paths.append(dest)
-
-#     batch_state.update({
-#         "running": True,
-#         "total": len(saved_paths),
-#         "done": 0,
-#         "current": "",
-#         "errors": [],
-#         "logs": [],        
-#         "output_path": None,
-#     })
-#     batch_state["file_paths"] = {os.path.basename(f): f for f in saved_paths}
-
-
-#     output_csv = os.path.join(PREVIEW_DIR, "batch_dir_results.csv")
-
-#     def run_batch():
-#         try:
-#             all_rows = []
-#             for filepath in saved_paths:
-#                 batch_state["current"] = os.path.basename(filepath)
-#                 try:
-#                     if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
-#                         inspector.summary_rows.clear()
-#                     inspector.last_gdf = None
-#                     log_capture = StringIO()
-#                     with redirect_stdout(log_capture):
-#                         inspector.inspect_file(filepath, gdf_reference)
-#                     captured = log_capture.getvalue()
-#                     if captured:
-#                         for line in captured.splitlines():
-#                             if line.strip():
-#                                 batch_state["logs"].append(f"[{os.path.basename(filepath)}] {line}")
-#                     if inspector.summary_rows:
-#                         all_rows.append(dict(inspector.summary_rows[-1]))
-#                         # Write CSV immediately after each file
-#                         df_out = pd.DataFrame(all_rows)
-#                         for col in df_out.columns:
-#                             if df_out[col].dtype == object:
-#                                 df_out[col] = df_out[col].apply(
-#                                     lambda v: json.dumps(v, ensure_ascii=False)
-#                                     if isinstance(v, dict) else v
-#                                 )
-#                         df_out.to_csv(output_csv, index=False, encoding="utf-8-sig")
-#                         batch_state["output_path"] = output_csv
-#                 except Exception as e:
-#                     batch_state["errors"].append(f"{os.path.basename(filepath)}: {str(e)}")
-#                 finally:
-#                     batch_state["done"] += 1
-#         except Exception as e:
-#             batch_state["errors"].append(f"Fatal: {str(e)}")
-#         finally:
-#             batch_state["running"] = False
-#             shutil.rmtree(tmpdir, ignore_errors=True)
-
-#     batch_executor.submit(run_batch)
-#     return jsonify({"message": f"Batch started: {len(saved_paths)} files.", "total": len(saved_paths)})   
 @app.route("/batch_dir", methods=["POST"])
 def batch_dir():
     """Accept multiple uploaded files directly (from webkitdirectory picker)."""
@@ -640,6 +631,12 @@ def batch_dir():
 
     PRIMARY_EXTS = {".csv", ".txt", ".xlsx", ".geojson", ".json", ".shp", ".gpkg", ".zip"}
     SIDECAR_EXTS = {".shx", ".dbf", ".prj", ".cpg", ".qpj"}
+
+    # Clean up previous batch tmpdir if it exists
+    old_tmpdir = batch_state.get("tmpdir")
+    if old_tmpdir and os.path.exists(old_tmpdir):
+        shutil.rmtree(old_tmpdir, ignore_errors=True)
+        batch_state["tmpdir"] = None
 
     # Save all files to a temp dir, skipping hidden/config files
     tmpdir = tempfile.mkdtemp(prefix="geodata_batchdir_")
@@ -674,6 +671,7 @@ def batch_dir():
         "errors": [],
         "logs": [],
         "output_path": None,
+        "tmpdir": tmpdir, 
     })
     batch_state["file_paths"] = {os.path.basename(f): f for f in saved_paths}
 
@@ -697,8 +695,11 @@ def batch_dir():
                             if line.strip():
                                 batch_state["logs"].append(
                                     f"[{os.path.basename(filepath)}] {line}")
+                                
                     if inspector.summary_rows:
-                        all_rows.append(dict(inspector.summary_rows[-1]))
+                        all_rows.append(_translate_row_dict(
+                            dict(inspector.summary_rows[-1]), RESULT_TRANSLATIONS))
+                        
                         # Write CSV immediately after each file
                         df_out = pd.DataFrame(all_rows)
                         for col in df_out.columns:
@@ -717,7 +718,6 @@ def batch_dir():
             batch_state["errors"].append(f"Fatal: {str(e)}")
         finally:
             batch_state["running"] = False
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
     batch_executor.submit(run_batch)
     return jsonify({
@@ -862,19 +862,34 @@ def export():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-    
+
+
 if __name__ == "__main__":
+    _server = _cfg.get("server", {})
+    _host   = _server.get("host", "localhost")
+    _port   = int(_server.get("port", 5050))
+    _debug  = bool(_server.get("debug", False))
     print("=" * 70)
     print("Geodata Inspector - DuckDB-Optimized Version")
     print("=" * 70)
-    print("Features:")
-    print("  - Fast CSV/Excel processing with DuckDB")
-    print("  - LineString geometry detection (road networks, etc.)")
-    print("  - Point, LineString, and Polygon support")
-    print("  - French decimal separator handling")
-    print("  - Automatic CRS detection and transformation")
+    print(f"  Localisation : {_ref_info['label']}")
+    print(f"  Language     : {_cfg.get('language', 'fr')}")
+    print(f"  Server       : http://{_host}:{_port}/")
     print("=" * 70)
-    print("\nStarting web server...")
-    print("Open http://10.149.201.62:5050/ in your browser")
-    print("=" * 70) #http://10.149.201.62/ #127.0.0.1
-    app.run(debug=True, host="10.149.201.62", port=5050)
+    app.run(debug=_debug, host=_host, port=_port)
+    
+# if __name__ == "__main__":
+#     print("=" * 70)
+#     print("Geodata Inspector - DuckDB-Optimized Version")
+#     print("=" * 70)
+#     print("Features:")
+#     print("  - Fast CSV/Excel processing with DuckDB")
+#     print("  - LineString geometry detection (road networks, etc.)")
+#     print("  - Point, LineString, and Polygon support")
+#     print("  - French decimal separator handling")
+#     print("  - Automatic CRS detection and transformation")
+#     print("=" * 70)
+#     print("\nStarting web server...")
+#     print("Open http://10.149.201.62:5050/ in your browser")
+#     print("=" * 70) #http://10.149.201.62/ #127.0.0.1
+#     app.run(debug=True, host="10.149.201.62", port=5050)

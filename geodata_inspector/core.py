@@ -49,7 +49,6 @@ def get_file_metadata(filepath):
     """Extract file metadata."""
     stats = os.stat(filepath)
     return {
-        "Dossier": os.path.dirname(filepath),
         "Nom du fichier": os.path.basename(filepath),
         "Taille (Ko)": round(stats.st_size / 1024, 2),
         "Date de création du fichier (Y-M-D)": datetime.fromtimestamp(stats.st_ctime).strftime('%Y-%m-%d')
