@@ -1,0 +1,86 @@
+pour demain : 
+
+erreur lors du traitement des données anglaises - conversion vers 2154
+
+derniere réponse de claude : 
+Two problems visible in the logs:
+
+Still filtering to France bounds lon=[-5.5,10.0] lat=[41.0,51.5] — the UK bounds [-8.5, 49.5, 2.0, 61.0] are not reaching the function. wgs84_bounds is still None somewhere in the call chain.
+Still reprojecting to EPSG:2154 — this is hardcoded throughout and makes no sense for UK data. The whole pipeline assumes France/Lambert93.
+
+Both are the same root cause: the entire geometry pipeline is France-specific. The metric CRS should also come from the localisation config.
+
+Fix 1 — wgs84_bounds not arriving: add debug print temporarily
+In process_geometry_duckdb_points, right at the top after the signature, add:
+python    print(f"[DEBUG] wgs84_bounds received: {wgs84_bounds}")
+This will immediately show whether the value is arriving or being lost in the call chain. My guess is inspect_csv_duckdb is passing it correctly but process_geometry_duckdb wrapper is dropping it — check that the wrapper was actually updated.
+
+Fix 2 — stop reprojecting to 2154 for non-France data
+The target CRS should come from the localisation config too. Pass metric_crs alongside wgs84_bounds:
+config.py — update get_wgs84_bounds to return both:
+pythondef get_localisation_params(cfg):
+    """Return wgs84_bounds and metric_crs for the configured localisation."""
+    loc = cfg.get("localisation", {})
+    country = loc.get("country", "france").lower()
+    info = LOCALISATIONS.get(country, LOCALISATIONS["france"])
+    return {
+        "wgs84_bounds": info.get("wgs84_bounds", [-5.5, 41.0, 10.0, 51.5]),
+        "metric_crs": info.get("metric_crs", 2154),
+    }
+app.py — replace get_wgs84_bounds with get_localisation_params:
+pythonfrom config import get_config, get_reference_info, get_ui_labels, get_result_key_translations, get_geo_key_patterns, get_localisation_params
+_loc_params = get_localisation_params(_cfg)
+WGS84_BOUNDS = _loc_params["wgs84_bounds"]
+METRIC_CRS = _loc_params["metric_crs"]
+Update /set_language:
+pythonglobal _cfg, UI, RESULT_TRANSLATIONS, GEO_KEY_PATTERNS, WGS84_BOUNDS, METRIC_CRS
+...
+_loc_params = get_localisation_params(_cfg)
+WGS84_BOUNDS = _loc_params["wgs84_bounds"]
+METRIC_CRS = _loc_params["metric_crs"]
+Update all inspect_file calls:
+pythoninspector.inspect_file(filepath_to_inspect, gdf_reference,
+    geo_key_patterns=GEO_KEY_PATTERNS,
+    wgs84_bounds=WGS84_BOUNDS,
+    metric_crs=METRIC_CRS)
+core.py — thread metric_crs through every function signature and replace every hardcoded 2154:
+pythondef inspect_file(filepath, gdf_metro, geo_key_patterns=None, wgs84_bounds=None, metric_crs=2154):
+def inspect_csv_duckdb(filepath, gdf_metro, geo_key_patterns=None, wgs84_bounds=None, metric_crs=2154):
+def inspect_excel(filepath, gdf_metro, sample_size=5000, geo_key_patterns=None, wgs84_bounds=None, metric_crs=2154):
+def inspect_geospatial_duckdb(filepath, gdf_metro, geo_key_patterns=None, wgs84_bounds=None, metric_crs=2154):
+def process_geometry_duckdb(conn, table_name, x_col, y_col, gdf_metro, wgs84_bounds=None, metric_crs=2154):
+def process_geometry_duckdb_points(conn, table_name, x_col, y_col, gdf_metro, wgs84_bounds=None, metric_crs=2154):
+def process_geometry_duckdb_linestrings(conn, table_name, x_start, y_start, x_end, y_end, gdf_metro, wgs84_bounds=None, metric_crs=2154):
+def process_geometry_duckdb_native(conn, table_name, geom_col, gdf_metro, wgs84_bounds=None, metric_crs=2154):
+Then in process_geometry_duckdb_points, replace the two hardcoded 2154 references:
+python    PROJ_STRINGS = {
+        4326: '+proj=longlat +datum=WGS84',
+        2154: '+proj=lcc +lat_0=46.5 +lon_0=3 +lat_1=49 +lat_2=44 +x_0=700000 +y_0=6600000 +ellps=GRS80 +units=m',
+        3857: '+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m',
+        27700: '+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +ellps=airy +units=m',
+        25832: '+proj=utm +zone=32 +ellps=GRS80 +units=m',
+        3035: '+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 +ellps=GRS80 +units=m',
+        5070: '+proj=aea +lat_0=23 +lon_0=-96 +lat_1=29.5 +lat_2=45.5 +x_0=0 +y_0=0 +datum=NAD83 +units=m',
+        2062: '+proj=lcc +lat_1=40 +lat_2=40 +lat_0=40 +lon_0=-3 +x_0=2500000 +y_0=0 +ellps=intl +units=m',
+    }
+
+    if detected_crs != metric_crs:
+        source_proj = PROJ_STRINGS.get(detected_crs, f'EPSG:{detected_crs}')
+        target_proj = PROJ_STRINGS.get(metric_crs, f'EPSG:{metric_crs}')
+        print(f"[DuckDB Spatial] Transforming from EPSG:{detected_crs} to EPSG:{metric_crs}...")
+        conn.execute(f"""
+            CREATE TABLE geo_processed AS
+            SELECT *,
+                ST_Transform(ST_Point("{x_col}", "{y_col}"), '{source_proj}', '{target_proj}') as geom
+            FROM geo_filtered_raw
+        """)
+    else:
+        conn.execute(f"""
+            CREATE TABLE geo_processed AS
+            SELECT *, ST_Point("{x_col}", "{y_col}") as geom
+            FROM geo_filtered_raw
+        """)
+Apply the same PROJ_STRINGS expansion and metric_crs substitution to process_geometry_duckdb_linestrings and process_geometry_duckdb_native.
+Also update the last_gdf reprojection in inspect_csv_duckdb:
+python            if detected_crs != metric_crs:
+                last_gdf = last_gdf.to_crs(epsg=metric_crs)

@@ -1,2 +1,0 @@
-add_extraction_result.py
-diagnose_excel.py
