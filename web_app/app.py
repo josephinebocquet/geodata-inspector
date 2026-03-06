@@ -34,8 +34,13 @@ _reference_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "refer
 _ref_info = get_reference_info(_cfg, _reference_dir)
 UI = get_ui_labels(_cfg)
 
-from config import get_config, get_reference_info, get_ui_labels, get_result_key_translations
+from config import get_config, get_reference_info, get_result_key_translations, get_geo_key_patterns, get_localisation_params
+
 RESULT_TRANSLATIONS = get_result_key_translations(_cfg)
+GEO_KEY_PATTERNS = get_geo_key_patterns(_cfg)
+_loc_params = get_localisation_params(_cfg)
+WGS84_BOUNDS = _loc_params["wgs84_bounds"]
+METRIC_CRS = _loc_params["metric_crs"]
 
 # Pre-load the reference geodataframe once at startup
 if _ref_info["available"]:
@@ -60,6 +65,9 @@ batch_state = {
     "file_paths": {},
     "output_path": None,
     "tmpdir": None,
+    "gdfs": {},
+    "stop_requested": False,
+
 }
 batch_executor = ThreadPoolExecutor(max_workers=1)
 
@@ -105,10 +113,10 @@ def _make_serializable(obj):
         return [_make_serializable(v) for v in obj]
     # NaN check must come BEFORE numpy type conversion, otherwise
     # np.floating NaN gets converted to float('nan') and returned early.
-    if isinstance(obj, float) and np.isnan(obj):
+    if isinstance(obj, float) and (np.isnan(obj) or np.isinf(obj)):
         return None
     if isinstance(obj, (np.floating,)):
-        if np.isnan(obj):
+        if np.isnan(obj) or np.isinf(obj):
             return None
         return float(obj)
     if isinstance(obj, (np.integer,)):
@@ -163,6 +171,11 @@ def _translate_row_dict(row, translations):
         return row
     return {translations.get(k, k): v for k, v in row.items()}
 
+def _translate_values(summary, translations):
+    """Translate plain string values that are themselves translation keys."""
+    if not translations:
+        return summary
+    return [[k, translations.get(v, v) if isinstance(v, str) else v] for k, v in summary]   
     
 def _extract_map_data():
     """
@@ -217,10 +230,14 @@ def index():
 
 @app.route("/set_language/<lang>", methods=["POST"])
 def set_language(lang):
+    global _cfg, UI, RESULT_TRANSLATIONS, GEO_KEY_PATTERNS, WGS84_BOUNDS, METRIC_CRS
+    _loc_params = get_localisation_params(_cfg)
+    WGS84_BOUNDS = _loc_params["wgs84_bounds"]
+    METRIC_CRS = _loc_params["metric_crs"]
+    
     if lang not in ("fr", "en"):
         return jsonify({"ok": False, "error": "Unsupported language"}), 400
     try:
-        global _cfg, UI, RESULT_TRANSLATIONS
         _cfg["language"] = lang
         UI = get_ui_labels(_cfg)
         RESULT_TRANSLATIONS = get_result_key_translations(_cfg)
@@ -286,7 +303,10 @@ def upload():
         # Capture stdout from inspection process
         log_capture = StringIO()
         with redirect_stdout(log_capture):
-            inspector.inspect_file(filepath_to_inspect, gdf_reference)
+            inspector.inspect_file(filepath_to_inspect, gdf_reference,
+                        geo_key_patterns=GEO_KEY_PATTERNS,
+                        wgs84_bounds=WGS84_BOUNDS,
+                        metric_crs=METRIC_CRS)
 
         # Get captured logs
         logs = log_capture.getvalue()
@@ -301,7 +321,11 @@ def upload():
         result["Nom du fichier"] = file.filename
 
         # Reorder the summary to match COLUMN_ORDER
-        ordered_result = _translate_columns_detail(_reorder_summary(result), RESULT_TRANSLATIONS)
+        ordered_result = _translate_values(
+            _translate_columns_detail(
+                _reorder_summary(result), RESULT_TRANSLATIONS
+            ), RESULT_TRANSLATIONS
+        )
 
 
         # Extract map data from the stored GeoDataFrame
@@ -467,9 +491,12 @@ def batch_upload():
         "done": 0,
         "current": "",
         "errors": [],
-        "logs": [],        
+        "logs": [],
         "output_path": None,
-        "tmpdir": tmpdir, 
+        "tmpdir": tmpdir,
+        "gdfs": {},
+        "stop_requested": False,
+
     })
     batch_state["file_paths"] = {os.path.basename(f): f for f in files_to_process}
 
@@ -480,6 +507,8 @@ def batch_upload():
         try:
             all_rows = []
             for filepath in files_to_process:
+                if batch_state.get("stop_requested"):
+                    break
                 batch_state["current"] = os.path.basename(filepath)
                 try:
                     if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
@@ -487,15 +516,22 @@ def batch_upload():
                     inspector.last_gdf = None
                     log_capture = StringIO()
                     with redirect_stdout(log_capture):
-                        inspector.inspect_file(filepath, gdf_reference)
+                        inspector.inspect_file(filepath_to_inspect, gdf_reference,
+                                                geo_key_patterns=GEO_KEY_PATTERNS,
+                                                wgs84_bounds=WGS84_BOUNDS,
+                                                metric_crs=METRIC_CRS)
                     captured = log_capture.getvalue()
                     if captured:
                         for line in captured.splitlines():
                             if line.strip():
                                 batch_state["logs"].append(f"[{os.path.basename(filepath)}] {line}")
                     if inspector.summary_rows:
-                        all_rows.append(_translate_row_dict(
-                            dict(inspector.summary_rows[-1]), RESULT_TRANSLATIONS))
+                        row_dict = dict(inspector.summary_rows[-1])
+                        row_dict["_tmpname"] = os.path.basename(filepath)
+                        if inspector.last_gdf is not None:
+                            batch_state["gdfs"][os.path.basename(filepath)] = inspector.last_gdf.copy()
+                        all_rows.append(_translate_row_dict(row_dict, RESULT_TRANSLATIONS))
+                        
                         # Write CSV immediately after each file
                         df_out = pd.DataFrame(all_rows)
                         for col in df_out.columns:
@@ -586,32 +622,31 @@ def batch_result(index):
                 except Exception:
                     pass
 
-        ordered = _translate_columns_detail(_reorder_summary(row), RESULT_TRANSLATIONS)
-
-        # Re-inspect to get map data
+        ordered = _translate_values(
+            _translate_columns_detail(
+                _reorder_summary(row), RESULT_TRANSLATIONS
+            ), RESULT_TRANSLATIONS
+        )
+        # Get map data from GDF stored during batch processing
         map_data = None
-        filepath = row.get("Chemin", row.get("Nom du fichier", None))
+        tmpname = row.get("_tmpname", "")
+        filename_key = RESULT_TRANSLATIONS.get("Nom du fichier", "Nom du fichier")
+        display_filename = row.get(filename_key, row.get("Nom du fichier", f"File {index+1}"))
 
-        # Try to find the original file path from batch state
-        original_path = batch_state.get("file_paths", {}).get(
-            row.get("Nom du fichier", ""), None)
-
-        if original_path and os.path.exists(original_path):
+        stored_gdf = batch_state.get("gdfs", {}).get(tmpname)
+        if stored_gdf is not None and not stored_gdf.empty:
             try:
-                if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
-                    inspector.summary_rows.clear()
-                inspector.last_gdf = None
-                log_capture = StringIO()
-                with redirect_stdout(log_capture):
-                    inspector.inspect_file(original_path, gdf_reference)
+                inspector.last_gdf = stored_gdf
                 map_data = _extract_map_data()
             except Exception:
                 traceback.print_exc()
+            finally:
+                inspector.last_gdf = None
 
         return jsonify({
             "index": index,
             "total": len(df),
-            "filename": row.get("Nom du fichier", f"Fichier {index+1}"),
+            "filename": display_filename,
             "summary": _make_serializable(ordered),
             "map": map_data,
         })
@@ -671,7 +706,9 @@ def batch_dir():
         "errors": [],
         "logs": [],
         "output_path": None,
-        "tmpdir": tmpdir, 
+        "tmpdir": tmpdir,
+        "gdfs": {},
+        "stop_requested": False,
     })
     batch_state["file_paths"] = {os.path.basename(f): f for f in saved_paths}
 
@@ -681,6 +718,8 @@ def batch_dir():
         try:
             all_rows = []
             for filepath in saved_paths:
+                if batch_state.get("stop_requested"):
+                    break
                 batch_state["current"] = os.path.basename(filepath)
                 try:
                     if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
@@ -688,7 +727,11 @@ def batch_dir():
                     inspector.last_gdf = None
                     log_capture = StringIO()
                     with redirect_stdout(log_capture):
-                        inspector.inspect_file(filepath, gdf_reference)
+                        inspector.inspect_file(filepath_to_inspect, gdf_reference,
+                                                geo_key_patterns=GEO_KEY_PATTERNS,
+                                                wgs84_bounds=WGS84_BOUNDS,
+                                                metric_crs=METRIC_CRS)
+
                     captured = log_capture.getvalue()
                     if captured:
                         for line in captured.splitlines():
@@ -697,8 +740,11 @@ def batch_dir():
                                     f"[{os.path.basename(filepath)}] {line}")
                                 
                     if inspector.summary_rows:
-                        all_rows.append(_translate_row_dict(
-                            dict(inspector.summary_rows[-1]), RESULT_TRANSLATIONS))
+                        row_dict = dict(inspector.summary_rows[-1])
+                        row_dict["_tmpname"] = os.path.basename(filepath)
+                        if inspector.last_gdf is not None:
+                            batch_state["gdfs"][os.path.basename(filepath)] = inspector.last_gdf.copy()
+                        all_rows.append(_translate_row_dict(row_dict, RESULT_TRANSLATIONS))
                         
                         # Write CSV immediately after each file
                         df_out = pd.DataFrame(all_rows)
@@ -817,6 +863,10 @@ def export():
         if len(gdf) == 0:
             return jsonify({"error": "No valid geometries found after filtering nulls."}), 400
 
+        # If CRS is still not set, assume WGS84 as fallback
+        if gdf.crs is None:
+            gdf = gdf.set_crs(epsg=4326)
+
         # Reproject to EPSG:2154 for storage formats, WGS84 for GeoJSON/CSV
         base_name = os.path.splitext(os.path.basename(path))[0]
 
@@ -863,7 +913,42 @@ def export():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
+@app.route("/result/download", methods=["GET"])
+def result_download():
+    """Download the last single-file inspection result as CSV."""
+    if not inspector.summary_rows:
+        return jsonify({"error": "No result available."}), 404
+    try:
+        result = dict(inspector.summary_rows[-1])
+        # Flatten nested objects to JSON strings for CSV
+        flat = {}
+        for k, v in result.items():
+            if k.startswith("_"):
+                continue
+            tk = RESULT_TRANSLATIONS.get(k, k)
+            if isinstance(v, dict):
+                flat[tk] = json.dumps(v, ensure_ascii=False)
+            else:
+                flat[tk] = v
+        df = pd.DataFrame([flat])
+        csv_path = os.path.join(PREVIEW_DIR, "single_result.csv")
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        filename = result.get("Nom du fichier", "result")
+        base = os.path.splitext(os.path.basename(filename))[0]
+        from flask import send_file
+        return send_file(csv_path, mimetype="text/csv",
+                         as_attachment=True,
+                         download_name=f"{base}_inspection.csv")
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
+
+@app.route("/batch/stop", methods=["POST"])
+def batch_stop():
+    """Request the running batch to stop after the current file."""
+    batch_state["stop_requested"] = True
+    return jsonify({"ok": True})
 if __name__ == "__main__":
     _server = _cfg.get("server", {})
     _host   = _server.get("host", "localhost")

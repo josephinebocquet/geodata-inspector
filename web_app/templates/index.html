@@ -175,6 +175,12 @@
         .nested-table th:nth-child(2), .nested-table td:nth-child(2) { width: 36%; word-wrap: break-word; white-space: normal; }
         .nested-table th:nth-child(3), .nested-table td:nth-child(3) { width: 22%; white-space: normal; }
         .nested-table th:nth-child(4), .nested-table td:nth-child(4) { width: 20%; text-align: center; }
+        
+        /* 2-column variant (geo keys table) */
+        .nested-table.two-col th:nth-child(1), .nested-table.two-col td:nth-child(1) { width: 50%; }
+        .nested-table.two-col th:nth-child(2), .nested-table.two-col td:nth-child(2) { width: 50%; }
+        .nested-table.two-col th:nth-child(3), .nested-table.two-col td:nth-child(3) { display: none; }
+        .nested-table.two-col th:nth-child(4), .nested-table.two-col td:nth-child(4) { display: none; }
 
         /* Map */
         .map-container { flex: 2; min-width: 0; display: none; }
@@ -211,6 +217,15 @@
         }
         .preview-table tr:nth-child(even) td { background: #f5f7fa; }
         .preview-table tr:hover td { background: #e3f2fd; }
+
+        /* Single-file results download */
+        .result-download-btn {
+            display: none; margin-top: 1rem;
+            padding: 0.45rem 1.1rem; background: #00695c;
+            color: #fff; border: none; border-radius: 4px;
+            cursor: pointer; font-size: 0.85rem; font-weight: 500;
+        }
+        .result-download-btn:hover { background: #004d40; }
 
         /* Export section */
         .export-section { margin-top: 1rem; display: none; }
@@ -285,6 +300,12 @@
                 <div style="display:flex; gap:0.5rem; justify-content:center; flex-wrap:wrap;">
                     <button class="batch-btn" id="batchZipBtn">{{ UI.batch_zip_btn }}</button>
                     <button class="batch-btn" id="batchDirBtn">{{ UI.batch_dir_btn }}</button>
+                    <button class="batch-btn" id="batchStopBtn"
+                        onclick="stopBatch()"
+                        style="display:none; background:#c62828;">{{ UI.stop_btn }}</button>
+                    <button class="batch-btn" id="batchClearBtn"
+                        onclick="clearBatch()"
+                        style="display:none; background:#546e7a;">{{ UI.clear_batch_btn }} </button>
                 </div>
                 <div class="batch-progress" id="batchProgress">
                     <div class="progress-bar-wrap">
@@ -329,6 +350,9 @@
                 <table>
                     <tbody id="resultsBody"></tbody>
                 </table>
+                <button class="result-download-btn" id="resultDownloadBtn" onclick="downloadSingleResult()">
+                    ⬇ {{ UI.result_download_btn | default('Download results (CSV)') }}
+                </button>
                 <div class="preview-section" id="previewSection">
                     <button class="preview-btn" id="previewBtn" onclick="loadPreview()">
                        {{ UI.preview_btn }}
@@ -471,10 +495,10 @@
 
         async function uploadFile(file, isLargeFile = false, sizeMB = 0, allFiles = null) {
             clearLogs();
-            if (!logsContent.classList.contains('show')) {
-                logsContent.classList.add('show');
-                logsToggle.textContent = UI.hide_logs;;
-            }
+            // if (!logsContent.classList.contains('show')) {
+            //     logsContent.classList.add('show');
+            //     logsToggle.textContent = UI.hide_logs;;
+            // }
             if (isLargeFile) {
                 status.className = 'status warning';
                 status.textContent = UI.status_large_file.replace('{size}', sizeMB.toFixed(1));
@@ -525,6 +549,7 @@
 
                     displayResults(data.summary);
                     clearBtn.style.display = 'inline-block';
+                    document.getElementById('resultDownloadBtn').style.display = 'inline-block';
                     previewSection.style.display = 'block';
                     previewTableWrap.innerHTML = '';
                     previewBtn.textContent = UI.preview_btn;
@@ -568,7 +593,9 @@
         function renderNestedTable(data) {
             if (!data || data.length === 0) return `<em>${UI.no_data}</em>`;
             const headers = Object.keys(data[0]);
-            let html = '<table class="nested-table"><thead><tr>';
+            const tableClass = headers.length === 2 ? 'nested-table two-col' : 'nested-table';
+            let html = `<table class="${tableClass}"><thead><tr>`;
+            
             headers.forEach(h => {
                 // let displayHeader = h === 'Valeurs manquantes' ? 'Valeurs<br>manquantes' : h;
                 let displayHeader = h.includes(' ') ? h.replace(' ', '<br>') : h;
@@ -664,6 +691,30 @@
             }
         }
 
+        // ── Single-file result download ────────────────────────────────────
+        async function downloadSingleResult() {
+            try {
+                const resp = await fetch('/result/download');
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    alert(`Erreur : ${err.error}`);
+                    return;
+                }
+                const blob = await resp.blob();
+                const url  = URL.createObjectURL(blob);
+                const a    = document.createElement('a');
+                a.href     = url;
+                a.download = resp.headers.get('Content-Disposition')
+                    ?.split('filename=')[1]?.replace(/"/g, '') || 'result.csv';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } catch(e) {
+                alert(`Erreur : ${e.message}`);
+            }
+        }
+
         // ── Map ───────────────────────────────────────────────────────────
         function displayMap(mapData) {
             if (map) { map.remove(); }
@@ -713,6 +764,8 @@
             batchDirBtn.disabled = disabled;
             batchZipBtn.textContent = disabled ? '⏳' : UI.batch_zip_btn;
             batchDirBtn.textContent = disabled ? '⏳' : UI.batch_dir_btn;
+            document.getElementById('batchStopBtn').style.display = disabled ? 'inline-block' : 'none';
+            document.getElementById('batchClearBtn').style.display = disabled ? 'none' : 'inline-block'
         }
 
         function resetBatchProgress() {
@@ -759,6 +812,7 @@
             document.getElementById('mapNote').style.display = 'none';
             previewSection.style.display = 'none';
             previewTableWrap.innerHTML = '';
+            document.getElementById('resultDownloadBtn').style.display = 'none';
             document.getElementById('exportSection').style.display = 'none';
             document.getElementById('exportSection').querySelectorAll('.export-btn').forEach(btn => {
                 btn.disabled = false;
@@ -839,10 +893,10 @@
 
                 // Stream logs into the main log panel
                 if (s.logs && s.logs.length > 0) {
-                    if (!logsContent.classList.contains('show')) {
-                        logsContent.classList.add('show');
-                        logsToggle.textContent = 'Masquer les logs';
-                    }
+                    // if (!logsContent.classList.contains('show')) {
+                    //     logsContent.classList.add('show');
+                    //     logsToggle.textContent = UI.hide_logs;
+                    // }
                     const currentCount = logsContent.querySelectorAll('.log-entry').length;
                     s.logs.slice(currentCount).forEach(line => addLog(line, 'info'));
                 }
@@ -957,6 +1011,28 @@
             if (newIndex >= 0 && newIndex < batchTotalResults) {
                 loadBatchResult(newIndex);
             }
+        }
+
+        async function stopBatch() {
+            await fetch('/batch/stop', { method: 'POST' });
+            document.getElementById('batchStopBtn').style.display = 'none';
+        }
+
+        function clearBatch() {
+            // Hide navigator and results
+            document.getElementById('batchNavigator').style.display = 'none';
+            document.getElementById('batchProgress').style.display = 'none';
+            document.getElementById('batchStopBtn').style.display = 'none';
+            document.getElementById('batchClearBtn').style.display = 'none';
+            document.getElementById('batchDownloadBtn').style.display = 'none';
+            document.getElementById('batchDownloadExcelBtn').style.display = 'none';
+            results.style.display = 'none';
+            mapContainer.style.display = 'none';
+            if (map) { map.remove(); map = null; }
+            clearLogs();
+            batchCurrentIndex = 0;
+            batchTotalResults = 0;
+            if (batchPollInterval) { clearInterval(batchPollInterval); batchPollInterval = null; }
         }
     </script>
 </body>

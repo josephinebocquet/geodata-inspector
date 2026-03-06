@@ -15,48 +15,99 @@ import yaml
 # Localisation registry
 # Each entry: reference filename, metric CRS EPSG code, display name
 # ---------------------------------------------------------------------------
+
 LOCALISATIONS = {
     "france": {
         "reference_file": "fr_regions.geojson",
         "metric_crs": 2154,
         "label": "France (Lambert 93)",
         "wgs84_bounds": [-5.5, 41.0, 10.0, 51.5],
+        "geo_keys": [
+            {"label": "Code INSEE commune",   "patterns": ["code_insee", "insee_com", "codgeo",'insee','commune'],  "value_format": r"^\d{5}$"},
+            {"label": "Code postal",          "patterns": ["code_postal", "codepostal", "cp", "postal"], "value_format": r"^\d{5}$"},
+            {"label": "Code département",     "patterns": ["code_dep", "num_dep", "departement", "département","dep"], "value_format": r"^(\d{2,3}|2[AB])$"},
+            {"label": "Code région",          "patterns": ["code_reg", "num_reg", "region",'reg'],       "value_format": r"^\d{2}$"},
+            {"label": "Code IRIS",            "patterns": ["code_iris", "iris"],                         "value_format": r"^\d{9}$"},
+            {"label": "Code EPCI",            "patterns": ["code_epci", "epci", "siren_epci"],           "value_format": r"^\d{9}$"},
+        ],
     },
     "uk": {
         "reference_file": "uk_regions.geojson",
         "metric_crs": 27700,
         "label": "United Kingdom (British National Grid)",
         "wgs84_bounds": [-8.5, 49.5, 2.0, 61.0],
+        "geo_keys": [
+            {"label": "Postcode",             "patterns": ["postcode", "post_code", "pcd"],              "value_format": r"^[A-Z]{1,2}\d[A-Z\d]? ?\d[A-Z]{2}$"},
+            {"label": "ONS area code",        "patterns": ["ons_code", "area_code", "geo_code"],         "value_format": r"^[EWS]\d{8}$"},
+            {"label": "Local Authority code", "patterns": ["lad_code", "lad21cd", "local_authority"],    "value_format": None},
+            {"label": "LSOA code",            "patterns": ["lsoa_code", "lsoa11cd", "lsoa"],             "value_format": None},
+            {"label": "MSOA code",            "patterns": ["msoa_code", "msoa11cd", "msoa"],             "value_format": None},
+        ],
     },
     "germany": {
         "reference_file": "germany_states.geojson",
         "metric_crs": 25832,
         "label": "Germany (UTM Zone 32N)",
         "wgs84_bounds": [5.9, 47.3, 15.0, 55.1],
+        "geo_keys": [
+            {"label": "Postleitzahl (PLZ)",   "patterns": ["plz", "postleitzahl", "postcode","post"],           "value_format": r"^\d{5}$"},
+            {"label": "Gemeindeschlüssel",    "patterns": ["ags", "gemeinde", "gemeindeschluessel"],     "value_format": r"^\d{8}$"},
+            {"label": "Kreisschlüssel",       "patterns": ["kreis", "landkreis", "krs"],                 "value_format": r"^\d{5}$"},
+            {"label": "Bundesland code",      "patterns": ["bundesland", "land_code", "bland"],          "value_format": r"^\d{2}$"},
+            {"label": "NUTS code",            "patterns": ["nuts", "nuts_code", "nuts3"],                "value_format": r"^DE\w+$"},
+        ],
     },
     "italy": {
         "reference_file": "italy_regions.geojson",
         "metric_crs": 25832,
         "label": "Italy (UTM Zone 32N)",
         "wgs84_bounds": [6.6, 36.6, 18.5, 47.1],
+        "geo_keys": [
+            {"label": "CAP (codice postale)", "patterns": ["cap", "codice_postale", "postal"],           "value_format": r"^\d{5}$"},
+            {"label": "Codice ISTAT comune",  "patterns": ["istat", "cod_istat", "pro_com"],             "value_format": r"^\d{6}$"},
+            {"label": "Codice provincia",     "patterns": ["cod_prov", "provincia", "sigla_prov"],       "value_format": r"^\d{3}$"},
+            {"label": "Codice regione",       "patterns": ["cod_reg", "regione"],                        "value_format": r"^\d{2}$"},
+            {"label": "NUTS code",            "patterns": ["nuts", "nuts_code"],                         "value_format": r"^IT\w+$"},
+        ],
     },
     "spain": {
         "reference_file": "spain_regions.geojson",
         "metric_crs": 2062,
         "label": "Spain (Madrid 1870)",
         "wgs84_bounds": [-9.3, 35.9, 4.3, 43.8],
+        "geo_keys": [
+            {"label": "Código postal",        "patterns": ["cod_postal", "codigo_postal", "postal,""cp"],"value_format": r"^\d{5}$"},
+            {"label": "Código INE municipio", "patterns": ["cod_ine", "codigo_ine", "cusec"],            "value_format": r"^\d{5}$"},
+            {"label": "Código provincia",     "patterns": ["cod_prov", "provincia"],                     "value_format": r"^\d{2}$"},
+            {"label": "Código comunidad",     "patterns": ["cod_ccaa", "comunidad", "ccaa"],             "value_format": r"^\d{2}$"},
+            {"label": "NUTS code",            "patterns": ["nuts", "nuts_code"],                         "value_format": r"^ES\w+$"},
+        ],
     },
     "usa": {
         "reference_file": "usa_states.geojson",
         "metric_crs": 4326,
         "label": "World Geodetic System 1984",
         "wgs84_bounds": [-125.0, 24.0, -66.0, 50.0],
+        "geo_keys": [
+            {"label": "ZIP code",             "patterns": ["zip", "zip_code", "zipcode", "postal"],      "value_format": r"^\d{5}(-\d{4})?$"},
+            {"label": "FIPS state code",      "patterns": ["fips", "state_fips", "statefp"],             "value_format": r"^\d{2}$"},
+            {"label": "FIPS county code",     "patterns": ["county_fips", "countyfp", "fips_county"],   "value_format": r"^\d{5}$"},
+            {"label": "Census tract",         "patterns": ["tract", "census_tract", "tractce"],          "value_format": None},
+            {"label": "State abbreviation",   "patterns": ["state_abbr", "state_code", "stusps"],        "value_format": r"^[A-Z]{2}$"},
+        ],
     },
     "europe": {
         "reference_file": "europe_geographic.geojson",
         "metric_crs": 3035,
         "label": "Europe (ETRS89-LAEA)",
         "wgs84_bounds": [-25.0, 34.0, 45.0, 72.0],
+        "geo_keys": [
+            {"label": "NUTS 0 (country)",     "patterns": ["nuts0", "country_code", "cntr_code"],        "value_format": r"^[A-Z]{2}$"},
+            {"label": "NUTS 1",               "patterns": ["nuts1", "nuts_1"],                           "value_format": r"^[A-Z]{2}\d$"},
+            {"label": "NUTS 2",               "patterns": ["nuts2", "nuts_2"],                           "value_format": r"^[A-Z]{2}\d{2}$"},
+            {"label": "NUTS 3",               "patterns": ["nuts3", "nuts_3"],                           "value_format": r"^[A-Z]{2}\d{3}$"},
+            {"label": "LAU code",             "patterns": ["lau", "lau_code", "lau_id"],                 "value_format": None},
+        ],
     },
 }
 
@@ -221,6 +272,8 @@ def get_ui_labels(cfg):
             "batch_nav_counter":       "{current} / {total}",
             "batch_nav_counter_live":  "{current} / {total} (en cours...)",
             "no_data":                 "Aucune donnée",
+            "stop_btn":                "⏹ Arrêter",
+            "clear_batch_btn":         "✕ Effacer",
         },
         "en": {
             "page_title":              "Geodata Inspector",
@@ -272,6 +325,8 @@ def get_ui_labels(cfg):
             "batch_nav_counter":       "{current} / {total}",
             "batch_nav_counter_live":  "{current} / {total} (in progress...)",
             "no_data":                 "No data",
+            "stop_btn":                "⏹ Stop",
+            "clear_batch_btn":         "✕ Clear",
         },
     }
     return labels.get(lang, labels["fr"])
@@ -304,21 +359,73 @@ def get_result_key_translations(cfg):
             "Géotransformation":                        "Geotransformation",
             "Score de complétude des clés géographique": "Geographic key completeness score",
             "Score de complétude géographique":         "Geographic completeness score",
+
+            "Score de complétude moyen": "Mean completeness score" ,  
+            "Score de complétude std": "Completeness std score",       
+            "Score de complétude moyen (%)": "Mean completeness score (%)",
+            "Score de complétude std (%)": "Completeness std score (%)",
+            
             # Spatial metrics
             "CRS":                                      "CRS",
             "Types de géométrie":                       "Geometry types",
             "Emprise estimée (km2)":                    "Estimated extent (km2)",
             "Densité (obj/km2)":                        "Density (obj/km2)",
-            "Taux de remplissage (%)":                  "Fill rate (%)",
+            "Taux de remplissage géométrique (%)":      "Geometric fill rate (%)",
             "Complexite moyenne":                       "Average complexity",
             "Geometries dupliquees (%)":                "Duplicate geometries (%)",
             "Couverture territoriale hexagonale (%)":   "Hexagonal territorial coverage (%)",
+            "Clé identifiée":                           "Identified key",
+            "Aire de référence" :                       "Reference area",
+            "Présence géométrie séparée (x,y)":         "Separate geometry presence (x, y)",
+            "Présence géométrie multiples (x1,y1), (x2,y2)": "Presence of multiple geometries (x1,y1), (x2,y2)", 
+            "Jointure spatiale à l'aide de clés géographiques" :"Spatial join using geographic keys",
+            "Présence géométrie" : "Presence geometry",
+            "Géocodage de l'adresse": "Address geocoding",
+            "Aucune géométrie" : "No geometry", 
+            "Granularité" : "Granularity",
+            "Complexité moyenne des géométries" : "Average complexity of geometries",
+            "Part des geometries dupliquees (%)" : "Percentage of duplicate geometries (%)",
+            
             # Nested column table headers
             "Colonne":                                  "Column",
             "Exemple":                                  "Example",
             "Type":                                     "Type",
             "Valeurs manquantes":                       "Missing values",
+            "Présentes (%)" :                           "Presence (%)",
+            "Valides (%)" :                             "Valid (%)",
+            "No geometry":                              "No geometry",
+            "Geometry present":                         "Geometry present",
+            "Separate geometry (x,y)":                  "Separate geometry (x,y)",
+            "Multiple geometry columns (x1,y1), (x2,y2)": "Multiple geometry columns (x1,y1), (x2,y2)",
+            "Données géographiques" : "Geographic data"
+
         }
     }
 
     return translations.get(lang, {})
+
+def get_geo_key_patterns(cfg):
+    """Return the geo_keys list for the configured localisation."""
+    loc = cfg.get("localisation", {})
+    country = loc.get("country", "france").lower()
+    if country == "custom":
+        return []
+    info = LOCALISATIONS.get(country, LOCALISATIONS["france"])
+    return info.get("geo_keys", [])
+    
+def get_localisation_params(cfg):
+    """Return wgs84_bounds and metric_crs for the configured localisation."""
+    loc = cfg.get("localisation", {})
+    country = loc.get("country", "france").lower()
+    info = LOCALISATIONS.get(country, LOCALISATIONS["france"])
+    return {
+        "wgs84_bounds": info.get("wgs84_bounds", [-5.5, 41.0, 10.0, 51.5]),
+        "metric_crs": info.get("metric_crs", 2154),
+    }
+    
+# def get_wgs84_bounds(cfg):
+#     """Return the WGS84 bounds for the configured localisation."""
+#     loc = cfg.get("localisation", {})
+#     country = loc.get("country", "france").lower()
+#     info = LOCALISATIONS.get(country, LOCALISATIONS["france"])
+#     return info.get("wgs84_bounds", [-5.5, 41.0, 10.0, 51.5])  # France fallback
