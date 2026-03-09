@@ -1,6 +1,6 @@
 language: fr
 localisation:
-  country: fr
+  country: france
   custom_metric_crs: 2154
   custom_reference_path: ''
 server:

@@ -240,6 +240,31 @@
         .export-btn.gpkg    { background: #1565c0; }
         .export-btn.shp     { background: #6a1b9a; }
         .export-btn.csv     { background: #e65100; }
+        
+        /* Metric info tooltip */
+        .metric-info {
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 15px; height: 15px; border-radius: 50%;
+            background: #90a4ae; color: #fff; font-size: 0.65rem;
+            font-weight: 700; cursor: help; margin-left: 6px;
+            vertical-align: middle; flex-shrink: 0; line-height: 1;
+            position: relative;
+        }
+        .metric-info:hover::after {
+            content: attr(data-tooltip);
+            position: absolute; left: 22px; top: 50%; transform: translateY(-50%);
+            background: #263238; color: #eceff1; font-size: 0.78rem;
+            padding: 0.5rem 0.75rem; border-radius: 5px; z-index: 999;
+            width: 260px; white-space: normal; line-height: 1.4;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.25); font-weight: 400;
+            pointer-events: none;
+        }
+        .metric-info:hover::before {
+            content: '';
+            position: absolute; left: 18px; top: 50%; transform: translateY(-50%);
+            border: 5px solid transparent;
+            border-right-color: #263238; z-index: 999;
+        }
 
         /* Responsive */
         @media (max-width: 900px) {
@@ -405,6 +430,7 @@
         const previewTableWrap = document.getElementById('previewTableWrap');
 
         let map = null;
+        let currentGlossary = {};
 
         // ── Clear button ──────────────────────────────────────────────────
         clearBtn.addEventListener('click', () => {
@@ -548,6 +574,10 @@
                     addLog(UI.log_lines.replace('{rows}', nbLignes).replace('{cols}', nbColonnes));
 
                     displayResults(data.summary);
+                    
+                    if (data.glossary_translated) currentGlossary = data.glossary_translated;
+                    injectGlossaryIcons(currentGlossary);
+                    
                     clearBtn.style.display = 'inline-block';
                     document.getElementById('resultDownloadBtn').style.display = 'inline-block';
                     previewSection.style.display = 'block';
@@ -622,6 +652,41 @@
                 resultsBody.appendChild(tr);
             }
             results.style.display = 'block';
+        }
+        // ── Glossary tooltips ─────────────────────────────────────────────
+        const GLOSSARY_FR_KEYS = [
+            "Score de complétude global",
+            "Clés géographiques",
+            "Géotransformation",
+            "CRS",
+            "Types de géométrie",
+            "Emprise estimée (km2)",
+            "Densité (obj/km2)",
+            "Taux de remplissage géométrique (%)",
+            "Complexité moyenne des géométries",
+            "Part des geometries dupliquees (%)",
+            "Couverture territoriale (%)",
+            "Score de complétude géographique",
+            "Score de complétude des clés géographique",
+        ];
+
+        
+        function injectGlossaryIcons(glossary) {
+            const rows = resultsBody.querySelectorAll('tr');
+            rows.forEach(tr => {
+                const th = tr.querySelector('th');
+                if (!th) return;
+                const existing = th.querySelector('.metric-info');
+                if (existing) existing.remove();
+                // glossary keys are already in the display language
+                const tooltip = glossary[th.textContent.trim()];
+                if (!tooltip) return;
+                const icon = document.createElement('span');
+                icon.className = 'metric-info';
+                icon.textContent = 'i';
+                icon.setAttribute('data-tooltip', tooltip);
+                th.appendChild(icon);
+            });
         }
 
         // ── Preview ───────────────────────────────────────────────────────
@@ -802,6 +867,7 @@
         
         function resetMainResults() {
             results.style.display = 'none';
+            currentGlossary = {};
             mapContainer.style.display = 'none';
             if (map) { map.remove(); map = null; }
             status.className = 'status';
@@ -970,6 +1036,9 @@
 
                 // Display result in main results panel
                 displayResults(data.summary);
+
+                if (data.glossary_translated) currentGlossary = data.glossary_translated;
+                injectGlossaryIcons(currentGlossary);
 
                 // Show map if available — reset first
                 // Handle map

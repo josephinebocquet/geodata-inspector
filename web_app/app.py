@@ -101,7 +101,7 @@ COLUMN_ORDER = [
     "Taux de remplissage (%)",
     "Complexite moyenne",
     "Geometries dupliquees (%)",
-    "Couverture territoriale hexagonale (%)",
+    "Couverture territoriale (%)",
 ]
 
 
@@ -335,7 +335,12 @@ def upload():
         response = {
             "summary": _make_serializable(ordered_result),
             "map": _make_serializable(map_data) if map_data else None,
-            "logs": log_lines
+            "logs": log_lines,
+            "glossary": UI.get("glossary", {}),
+            "glossary_translated": {
+                RESULT_TRANSLATIONS.get(k, k): v
+                for k, v in UI.get("glossary", {}).items()
+            },
         }
 
         # Add warning for large files using metadata size
@@ -649,6 +654,11 @@ def batch_result(index):
             "filename": display_filename,
             "summary": _make_serializable(ordered),
             "map": map_data,
+            "glossary": UI.get("glossary", {}),
+            "glossary_translated": {
+                RESULT_TRANSLATIONS.get(k, k): v
+                for k, v in UI.get("glossary", {}).items()
+            },
         })
     except Exception as e:
         traceback.print_exc()
