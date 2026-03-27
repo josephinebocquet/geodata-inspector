@@ -1,7 +1,7 @@
-language: fr
+language: en
 localisation:
-  country: france
-  custom_metric_crs: 2154
+  country: germany
+  custom_metric_crs: 
   custom_reference_path: ''
 server:
   debug: false

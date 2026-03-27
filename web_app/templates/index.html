@@ -265,7 +265,35 @@
             border: 5px solid transparent;
             border-right-color: #263238; z-index: 999;
         }
-
+        /* ── DateTime charts ───────────────────────────────────────────────── */
+        .dt-section {
+            margin-bottom: 1.2rem;
+        }
+        .dt-label {
+            font-size: 0.78rem; font-weight: 600; color: #455a64;
+            margin-bottom: 0.3rem; text-transform: uppercase; letter-spacing: 0.03em;
+        }
+        .dt-meta {
+            font-size: 0.75rem; color: #78909c; margin-bottom: 0.5rem;
+        }
+        .dt-chart-wrap {
+            position: relative; width: 100%; overflow: hidden;
+        }
+        .dt-chart-wrap svg {
+            display: block; width: 100%; height: auto;
+            border-radius: 4px; background: #f8fafb;
+        }
+        .dt-axis-label {
+            font-size: 9px; fill: #90a4ae; font-family: inherit;
+        }
+        .dt-bar { fill: #1976d2; opacity: 0.85; }
+        .dt-bar:hover { opacity: 1; }
+        .dt-occupancy { fill: #00897b; opacity: 0.85; }
+        .dt-occupancy:hover { opacity: 1; }
+        .dt-date-cols {
+            font-size: 0.75rem; color: #607d8b;
+            margin-top: 0.6rem; font-style: italic;
+        }
         /* Responsive */
         @media (max-width: 900px) {
             .upload-combined { flex-direction: column; }
@@ -407,6 +435,11 @@
                 </p>
             </div>
         </div>
+        <!-- DateTime analysis section -->
+        <div id="datetimeSection" style="display:none; margin-top:1.5rem;">
+            <h2 style="color:#1a1a2e; margin-bottom:1rem;">{{ UI.dt_section_title }}</h2>
+            <div id="datetimeContent"></div>
+        </div>
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -455,6 +488,8 @@
                 btn.style.cursor = 'pointer';
                 btn.title = '';
             });
+            document.getElementById('datetimeSection').style.display = 'none';
+            document.getElementById('datetimeContent').innerHTML = '';
             console.log('[Geodata Inspector] Interface cleared');
         });
 
@@ -574,6 +609,7 @@
                     addLog(UI.log_lines.replace('{rows}', nbLignes).replace('{cols}', nbColonnes));
 
                     displayResults(data.summary);
+                    displayDatetime(data.datetime);  
                     
                     if (data.glossary_translated) currentGlossary = data.glossary_translated;
                     injectGlossaryIcons(currentGlossary);
@@ -616,6 +652,7 @@
         function formatValue(val, key = '') {
             if (val === null || val === undefined) return '<em>N/A</em>';
             if (typeof val === 'object' && val._table && val.data) return renderNestedTable(val.data);
+            if (typeof val === 'object' && val._datetime) return renderDatetimeAnalysis(val);
             if (typeof val === 'object') return JSON.stringify(val, null, 2);
             return String(val);
         }
@@ -643,6 +680,134 @@
             html += '</tbody></table>';
             return html;
         }
+        function renderDatetimeAnalysis(dt) {
+            if (!dt) return '<em>N/A</em>';
+            let html = '';
+        
+            if (dt.interval_pairs && dt.interval_pairs.length > 0) {
+                dt.interval_pairs.forEach(pair => {
+                    const isOccupancy = pair.chart_type === 'occupancy';
+                    const chartLabel = isOccupancy
+                        ? `${UI.dt_occupancy_label} — ${pair.col_start} / ${pair.col_end}`
+                        : `${UI.dt_histogram_label} — ${pair.col_start}`;
+                    const barClass  = isOccupancy ? 'dt-occupancy' : 'dt-bar';
+                    const yLabel    = isOccupancy ? UI.dt_y_label_intervals : UI.dt_y_label_count;
+                    const metaExtra = isOccupancy
+                        ? `&nbsp;·&nbsp; ${UI.dt_median_duration} : ${pair.median_duration_days} ${UI.dt_days}`
+                        : '';
+                    html += `<div class="dt-section">`;
+                    html += `<div class="dt-label">${chartLabel}</div>`;
+                    html += `<div class="dt-meta">
+                        ${UI.dt_coverage} : ${pair.global_min.slice(0,10)} → ${pair.global_max.slice(0,10)}
+                        (${pair.coverage_days} ${UI.dt_days})${metaExtra}
+                    </div>`;
+                    html += renderOccupancyChart(pair.buckets, barClass, yLabel, pair.unit || '');
+                    html += `</div>`;
+                });
+            }
+        
+            if (dt.singles && dt.singles.length > 0) {
+                dt.singles.forEach(single => {
+                    html += `<div class="dt-section">`;
+                    html += `<div class="dt-label">${UI.dt_histogram_label} — ${single.col}</div>`;
+                    html += `<div class="dt-meta">
+                        ${UI.dt_coverage} : ${single.global_min.slice(0,10)} → ${single.global_max.slice(0,10)}
+                        (${single.coverage_days} ${UI.dt_days}) &nbsp;·&nbsp; ${single.unit}
+                    </div>`;
+                    html += renderOccupancyChart(single.buckets, 'dt-bar', UI.dt_y_label_count, single.unit || '');
+                    html += `</div>`;
+                });
+            }
+        
+            // ── Summary: all detected date columns ───────────────────────────
+            if (dt.date_columns && dt.date_columns.length > 0) {
+                html += `<div class="dt-date-cols">
+                    ${UI.dt_detected_cols} : ${dt.date_columns.join(', ')}
+                </div>`;
+            }
+        
+            return html || `<em>${UI.dt_no_data}</em>`;
+        }
+        
+        function renderOccupancyChart(buckets, barClass, yLabel = '', unit = '') {
+            if (!buckets || buckets.length === 0) return '<em>No data</em>';
+        
+            const W = 560, H = 110, PAD_L = 36, PAD_R = 8, PAD_T = 6, PAD_B = 42;
+            const chartW = W - PAD_L - PAD_R;
+            const chartH = H - PAD_T - PAD_B;
+        
+            const maxCount = Math.max(...buckets.map(b => b.count), 1);
+            const n = buckets.length;
+            const barW = Math.max(1, chartW / n - 0.5);
+        
+            // Build bars
+            let bars = '';
+            buckets.forEach((b, i) => {
+                const x = PAD_L + (i / n) * chartW;
+                const bh = (b.count / maxCount) * chartH;
+                const y = PAD_T + chartH - bh;
+                bars += `<rect class="${barClass}" x="${x.toFixed(1)}" y="${y.toFixed(1)}"
+                    width="${barW.toFixed(1)}" height="${bh.toFixed(1)}">
+                    <title>${b.t.slice(0,10)} : ${b.count}</title>
+                </rect>`;
+            });
+        
+            // Y axis: 0 and max
+            const yAxis = `
+                <line x1="${PAD_L}" y1="${PAD_T}" x2="${PAD_L}" y2="${PAD_T + chartH}"
+                      stroke="#cfd8dc" stroke-width="1"/>
+                <text class="dt-axis-label" x="${PAD_L - 3}" y="${PAD_T + 4}" text-anchor="end">${maxCount}</text>
+                <text class="dt-axis-label" x="${PAD_L - 3}" y="${PAD_T + chartH}" text-anchor="end">0</text>
+            `;
+        
+            // X axis: evenly spaced labels (up to 8)
+            const maxLabels = Math.min(8, n);
+            const step = Math.max(1, Math.floor(n / maxLabels));
+            const labelIndices = [];
+            for (let i = 0; i < n; i += step) labelIndices.push(i);
+            if (labelIndices[labelIndices.length - 1] !== n - 1) labelIndices.push(n - 1);
+
+            let xLabels = `<line x1="${PAD_L}" y1="${PAD_T + chartH}" x2="${W - PAD_R}" y2="${PAD_T + chartH}"
+                                 stroke="#cfd8dc" stroke-width="1"/>`;
+
+            // Format label based on unit
+            function fmtLabel(isoStr) {
+                if (!isoStr) return '';
+                const d = isoStr.slice(0, 10);
+                if (unit === 'year')  return d.slice(0, 4);
+                if (unit === 'month') return d.slice(0, 7);
+                return d;
+            }
+
+            labelIndices.forEach((i, pos) => {
+                if (!buckets[i]) return;
+                const x = PAD_L + (i / n) * chartW + barW / 2;
+                const label = fmtLabel(buckets[i].t);
+                const isFirst = pos === 0;
+                const isLast = i === n - 1;
+                const anchor = isFirst ? 'start' : isLast ? 'end' : 'middle';
+                // Rotate labels to avoid overlap
+                xLabels += `<text class="dt-axis-label"
+                    transform="rotate(-35, ${x.toFixed(1)}, ${PAD_T + chartH + 8})"
+                    x="${x.toFixed(1)}" y="${PAD_T + chartH + 8}"
+                    text-anchor="end">${label}</text>`;
+            });
+
+            // Unit badge
+            const unitBadge = unit ? `<text class="dt-axis-label" 
+                x="${W - PAD_R}" y="${H - 2}" text-anchor="end" 
+                style="fill:#1976d2; font-weight:600;">/ ${unit}</text>` : '';
+
+            const yLabelSvg = yLabel ? `<text class="dt-axis-label" 
+                transform="rotate(-90)" x="${-(PAD_T + chartH/2)}" y="9"
+                text-anchor="middle">${yLabel}</text>` : '';
+
+            return `<div class="dt-chart-wrap">
+                <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
+                    ${yLabelSvg}${yAxis}${xLabels}${unitBadge}${bars}
+                </svg>
+            </div>`;
+        }
 
         function displayResults(summary) {
             resultsBody.innerHTML = '';
@@ -652,6 +817,16 @@
                 resultsBody.appendChild(tr);
             }
             results.style.display = 'block';
+        }
+        function displayDatetime(dt) {
+            const section = document.getElementById('datetimeSection');
+            const content = document.getElementById('datetimeContent');
+            if (!dt || (!dt.interval_pairs?.length && !dt.singles?.length)) {
+                section.style.display = 'none';
+                return;
+            }
+            content.innerHTML = renderDatetimeAnalysis(dt);
+            section.style.display = 'block';
         }
         // ── Glossary tooltips ─────────────────────────────────────────────
         const GLOSSARY_FR_KEYS = [
@@ -1036,6 +1211,7 @@
 
                 // Display result in main results panel
                 displayResults(data.summary);
+                displayDatetime(data.datetime);  
 
                 if (data.glossary_translated) currentGlossary = data.glossary_translated;
                 injectGlossaryIcons(currentGlossary);

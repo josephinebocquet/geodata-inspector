@@ -86,6 +86,8 @@ COLUMN_ORDER = [
     "Nb colonnes",
     "Colonnes",
     "Score de complétude global",
+    "Analyse temporelle",
+
 
     # Geographic info
     "Clés géographiques",
@@ -188,8 +190,9 @@ def _extract_map_data():
             return None
 
         gdf = inspector.last_gdf
+        print(f"[DEBUG] last_gdf.crs = {gdf.crs}, bounds = {gdf.total_bounds}")
 
-        # Ensure CRS is set
+        # Ensure CRS is setguess_crs_from_bounds_duckdb 
         if gdf.crs is None:
             return None
 
@@ -331,9 +334,18 @@ def upload():
         # Extract map data from the stored GeoDataFrame
         map_data = _extract_map_data()
 
-        # Build response
+        # Extract datetime analysis out of summary for separate rendering
+        dt_analysis = None
+        ordered_result_clean = []
+        for k, v in ordered_result:
+            if k == "Analyse temporelle":
+                dt_analysis = v
+            else:
+                ordered_result_clean.append([k, v])
+
         response = {
-            "summary": _make_serializable(ordered_result),
+            "summary": _make_serializable(ordered_result_clean),
+            "datetime": _make_serializable(dt_analysis) if dt_analysis else None,
             "map": _make_serializable(map_data) if map_data else None,
             "logs": log_lines,
             "glossary": UI.get("glossary", {}),
@@ -648,11 +660,21 @@ def batch_result(index):
             finally:
                 inspector.last_gdf = None
 
+        # Extract datetime analysis out of summary for separate rendering
+        dt_analysis = None
+        ordered_result_clean = []
+        for k, v in ordered_result:
+            if k == "Analyse temporelle":
+                dt_analysis = v
+            else:
+                ordered_result_clean.append([k, v])
+            
         return jsonify({
             "index": index,
             "total": len(df),
             "filename": display_filename,
             "summary": _make_serializable(ordered),
+            "datetime": _make_serializable(dt_analysis) if dt_analysis else None,
             "map": map_data,
             "glossary": UI.get("glossary", {}),
             "glossary_translated": {
@@ -786,7 +808,18 @@ def _df_to_duckdb(df):
     conn = duckdb.connect()
     conn.register("excel_tbl", df)
     return conn
-
+    
+@app.route("/datetime_analysis", methods=["GET"])
+def datetime_analysis():
+    """Return the datetime analysis for the last inspected file."""
+    if not inspector.summary_rows:
+        return jsonify({"error": "No result available."}), 404
+    result = inspector.summary_rows[-1]
+    dt = result.get("Analyse temporelle")
+    if not dt:
+        return jsonify({"available": False, "message": "No date columns detected."})
+    return jsonify({"available": True, **_make_serializable(dt)})
+    
 @app.route("/export", methods=["GET"])
 def export():
     """Export the full dataset as a geospatial file by re-reading the original."""

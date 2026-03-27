@@ -50,7 +50,7 @@ LOCALISATIONS = {
         "label": "Germany (UTM Zone 32N)",
         "wgs84_bounds": [5.9, 47.3, 15.0, 55.1],
         "geo_keys": [
-            {"label": "Postleitzahl (PLZ)",   "patterns": ["plz", "postleitzahl", "postcode","post"],           "value_format": r"^\d{5}$"},
+            {"label": "Postleitzahl (PLZ)",   "patterns": ["plz", "postleitzahl", "postcode","post"],    "value_format": r"^\d{5}$"},
             {"label": "Gemeindeschlüssel",    "patterns": ["ags", "gemeinde", "gemeindeschluessel"],     "value_format": r"^\d{8}$"},
             {"label": "Kreisschlüssel",       "patterns": ["kreis", "landkreis", "krs"],                 "value_format": r"^\d{5}$"},
             {"label": "Bundesland code",      "patterns": ["bundesland", "land_code", "bland"],          "value_format": r"^\d{2}$"},
@@ -289,6 +289,16 @@ def get_ui_labels(cfg):
                 "Clés géographiques": "Colonnes identifiées comme des référentiels géographiques joinables (ex: code INSEE, code département, code région).",
                 "Géotransformation": "Type de transformation géographique détectée : géométrie native, coordonnées x/y, géocodage requis, ou jointure spatiale.",
             },
+            "dt_section_title":   "Analyse temporelle",
+            "dt_occupancy_label": "Courbe de charge",
+            "dt_histogram_label": "Distribution",
+            "dt_coverage":        "Couverture",
+            "dt_days":            "jours",
+            "dt_median_duration": "Durée médiane des intervalles",
+            "dt_detected_cols":   "Colonnes date détectées",
+            "dt_no_data":         "Aucune colonne date détectée",
+            "dt_y_label_intervals": "intervalles actifs",
+            "dt_y_label_count":     "nb lignes",
         },
         "en": {
             "page_title":              "Geodata Inspector",
@@ -357,6 +367,17 @@ def get_ui_labels(cfg):
                 "Geographic keys": "Columns identified as joinable geographic references (e.g. INSEE code, department code, region code).",
                 "Geographic transformation": "Type of geographic transformation detected: native geometry, x/y coordinates, geocoding required, or spatial join.",
             },
+            # EN
+            "dt_section_title":   "Temporal analysis",
+            "dt_occupancy_label": "Occupancy curve",
+            "dt_histogram_label": "Distribution",
+            "dt_coverage":        "Coverage",
+            "dt_days":            "days",
+            "dt_median_duration": "Median interval duration",
+            "dt_detected_cols":   "Detected date columns",
+            "dt_no_data":         "No date column detected",
+            "dt_y_label_intervals": "active intervals",
+            "dt_y_label_count":     "row count",
         },
     }
     return labels.get(lang, labels["fr"])
