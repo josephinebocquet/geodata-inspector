@@ -199,292 +199,6 @@ def build_columns_detail_duckdb(conn, table_name, limit=5):
 
 
 # ============================================================================
-# TEMPORAL ANALYSIS
-# ============================================================================
-
-def detect_date_columns_duckdb(conn, table_name):
-    """
-    Detect columns containing date/datetime values, even if stored as VARCHAR.
-    Uses two strategies:
-    1. Column name matching (fast, for columns with date-related names)
-    2. Value-based detection (samples VARCHAR columns and tries to parse as dates)
-    Returns a dict with date column info and temporal analysis.
-    """
-    # Patterns that indicate a date column by name
-    DATE_NAME_PATTERNS = [
-        r'\bdate\b', r'\bdebut\b', r'\bfin\b', r'\bstart\b', r'\bend\b',
-        r'\btime\b', r'\btimestamp\b', r'\bcreated\b', r'\bupdated\b',
-        r'\bmodified\b', r'\bperiode\b', r'\bperiod\b', r'\bdt\b'
-    ]
-
-    # Common date formats to try (ordered by likelihood)
-    DATE_FORMATS = [
-        ('%d/%m/%Y %H:%M', r'^\d{2}/\d{2}/\d{4} \d{2}:\d{2}$'),      # 15/04/2005 00:00
-        ('%d/%m/%Y %H:%M:%S', r'^\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}$'),
-        ('%d/%m/%Y', r'^\d{2}/\d{2}/\d{4}$'),                         # 15/04/2005
-        ('%Y-%m-%d %H:%M:%S', r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$'),
-        ('%Y-%m-%d %H:%M', r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$'),
-        ('%Y-%m-%d', r'^\d{4}-\d{2}-\d{2}$'),                         # 2005-04-15
-        ('%d-%m-%Y', r'^\d{2}-\d{2}-\d{4}$'),                         # 15-04-2005
-        ('%m/%d/%Y', r'^\d{2}/\d{2}/\d{4}$'),                         # 04/15/2005 (US)
-        ('%Y%m%d', r'^\d{8}$'),                                       # 20050415
-    ]
-
-    schema = conn.execute(f"DESCRIBE {table_name}").fetchdf()
-    columns = schema['column_name'].tolist()
-    col_types = dict(zip(schema['column_name'], schema['column_type']))
-
-    date_columns = []
-    checked_cols = set()
-
-    def generate_histogram_buckets(col, detected_format, coverage_days):
-        """Generate histogram buckets by counting records per time period."""
-        try:
-            # Choose bucket size based on coverage
-            if coverage_days > 3650:  # > 10 years: use years
-                bucket_unit = 'year'
-                duckdb_trunc = 'year'
-            elif coverage_days > 365:  # > 1 year: use months
-                bucket_unit = 'month'
-                duckdb_trunc = 'month'
-            elif coverage_days > 30:  # > 1 month: use weeks
-                bucket_unit = 'week'
-                duckdb_trunc = 'week'
-            else:  # use days
-                bucket_unit = 'day'
-                duckdb_trunc = 'day'
-
-            # Query to count records per bucket
-            result = conn.execute(f"""
-                SELECT
-                    DATE_TRUNC('{duckdb_trunc}', TRY_STRPTIME(CAST("{col}" AS VARCHAR), '{detected_format}')) as bucket,
-                    COUNT(*) as cnt
-                FROM {table_name}
-                WHERE TRY_STRPTIME(CAST("{col}" AS VARCHAR), '{detected_format}') IS NOT NULL
-                GROUP BY bucket
-                ORDER BY bucket
-            """).fetchdf()
-
-            if len(result) == 0:
-                return [], bucket_unit
-
-            buckets = []
-            for _, row in result.iterrows():
-                if row['bucket'] is not None:
-                    buckets.append({
-                        't': str(row['bucket'])[:10],  # YYYY-MM-DD format
-                        'count': int(row['cnt'])
-                    })
-
-            return buckets, bucket_unit
-        except Exception as e:
-            print(f"[Temporal] Histogram generation failed for {col}: {e}")
-            return [], 'day'
-
-    def try_detect_date_format(samples):
-        """Try to detect date format from sample values."""
-        if not samples:
-            return None
-
-        for fmt, regex_pattern in DATE_FORMATS:
-            try:
-                # First check with regex for speed
-                matches = sum(1 for s in samples if s and re.match(regex_pattern, str(s).strip()))
-                if matches < len(samples) * 0.7:  # At least 70% should match the pattern
-                    continue
-
-                # Then verify with actual parsing
-                parsed = []
-                for s in samples[:5]:
-                    if s:
-                        try:
-                            parsed.append(datetime.strptime(str(s).strip(), fmt))
-                        except:
-                            pass
-
-                if len(parsed) >= 3:  # At least 3 successful parses
-                    return fmt
-            except:
-                continue
-        return None
-
-    def add_date_column(col, detected_format, samples):
-        """Add a date column to the results using SQL min/max and generate histogram."""
-        try:
-            # Use DuckDB's strptime for fast min/max
-            minmax = conn.execute(f"""
-                SELECT
-                    MIN(TRY_STRPTIME(CAST("{col}" AS VARCHAR), '{detected_format}')) as min_dt,
-                    MAX(TRY_STRPTIME(CAST("{col}" AS VARCHAR), '{detected_format}')) as max_dt
-                FROM {table_name}
-                WHERE "{col}" IS NOT NULL
-            """).fetchone()
-
-            if minmax[0] and minmax[1]:
-                min_date = minmax[0]
-                max_date = minmax[1]
-                coverage_days = (max_date - min_date).days
-
-                # Generate histogram buckets
-                buckets, bucket_unit = generate_histogram_buckets(col, detected_format, coverage_days)
-
-                date_columns.append({
-                    'column': col,
-                    'format': detected_format,
-                    'min_date': min_date.strftime('%Y-%m-%d'),
-                    'max_date': max_date.strftime('%Y-%m-%d'),
-                    'coverage_days': coverage_days,
-                    'sample': str(samples[0]) if samples else None,
-                    'buckets': buckets,
-                    'bucket_unit': bucket_unit
-                })
-                return True
-        except Exception as e:
-            print(f"[Temporal] SQL min/max failed for {col}: {e}")
-        return False
-
-    # Strategy 1: Check columns with date-related names
-    for col in columns:
-        col_lc = col.lower()
-        col_type = col_types.get(col, '').upper()
-
-        is_date_type = any(t in col_type for t in ['DATE', 'TIME', 'TIMESTAMP'])
-        name_matches = any(re.search(p, col_lc) for p in DATE_NAME_PATTERNS)
-
-        if is_date_type or name_matches:
-            checked_cols.add(col)
-
-            try:
-                samples = conn.execute(f"""
-                    SELECT CAST("{col}" AS VARCHAR) as val
-                    FROM {table_name}
-                    WHERE "{col}" IS NOT NULL
-                    LIMIT 10
-                """).fetchdf()['val'].tolist()
-
-                if not samples:
-                    continue
-
-                if is_date_type:
-                    # Native date type - use direct MIN/MAX
-                    minmax = conn.execute(f"""
-                        SELECT MIN("{col}") as min_dt, MAX("{col}") as max_dt
-                        FROM {table_name}
-                        WHERE "{col}" IS NOT NULL
-                    """).fetchone()
-
-                    if minmax[0] and minmax[1]:
-                        date_columns.append({
-                            'column': col,
-                            'format': 'native',
-                            'min_date': str(minmax[0])[:10],
-                            'max_date': str(minmax[1])[:10],
-                            'coverage_days': (minmax[1] - minmax[0]).days if hasattr(minmax[1] - minmax[0], 'days') else 0,
-                            'sample': str(samples[0]) if samples else None
-                        })
-                else:
-                    detected_format = try_detect_date_format(samples)
-                    if detected_format:
-                        add_date_column(col, detected_format, samples)
-
-            except Exception as e:
-                print(f"[Temporal] Error analyzing column {col}: {e}")
-                continue
-
-    # Strategy 2: Check VARCHAR columns by their values (auto-detection)
-    for col in columns:
-        if col in checked_cols:
-            continue
-
-        col_type = col_types.get(col, '').upper()
-
-        # Only check VARCHAR/TEXT columns that weren't already checked
-        if 'VARCHAR' not in col_type and 'TEXT' not in col_type and 'CHAR' not in col_type:
-            continue
-
-        try:
-            samples = conn.execute(f"""
-                SELECT CAST("{col}" AS VARCHAR) as val
-                FROM {table_name}
-                WHERE "{col}" IS NOT NULL
-                LIMIT 10
-            """).fetchdf()['val'].tolist()
-
-            if not samples:
-                continue
-
-            # Skip if values are too short or too long to be dates
-            avg_len = sum(len(str(s)) for s in samples if s) / len(samples) if samples else 0
-            if avg_len < 8 or avg_len > 25:
-                continue
-
-            detected_format = try_detect_date_format(samples)
-            if detected_format:
-                add_date_column(col, detected_format, samples)
-
-        except Exception as e:
-            continue
-
-    if not date_columns:
-        return None
-
-    # Build result in format expected by frontend
-    # Frontend expects: interval_pairs (start/end), singles, date_columns
-
-    # Try to detect start/end pairs (e.g., "Debut prelevement" / "Fin prelevement")
-    interval_pairs = []
-    singles = []
-    used_cols = set()
-
-    start_keywords = ['debut', 'start', 'begin', 'from', 'date_debut', 'dt_start']
-    end_keywords = ['fin', 'end', 'stop', 'to', 'date_fin', 'dt_end']
-
-    for d in date_columns:
-        col_lc = d['column'].lower()
-        # Check if this is a "start" column
-        if any(kw in col_lc for kw in start_keywords):
-            # Look for matching "end" column
-            for d2 in date_columns:
-                if d2['column'] in used_cols:
-                    continue
-                col2_lc = d2['column'].lower()
-                if any(kw in col2_lc for kw in end_keywords):
-                    # Found a pair - use start column's buckets for histogram
-                    interval_pairs.append({
-                        'col_start': d['column'],
-                        'col_end': d2['column'],
-                        'global_min': d['min_date'],
-                        'global_max': d2['max_date'],
-                        'coverage_days': d2['coverage_days'],
-                        'unit': d.get('bucket_unit', 'day'),
-                        'buckets': d.get('buckets', [])
-                    })
-                    used_cols.add(d['column'])
-                    used_cols.add(d2['column'])
-                    break
-
-    # Remaining columns are singles
-    for d in date_columns:
-        if d['column'] not in used_cols:
-            singles.append({
-                'col': d['column'],
-                'global_min': d['min_date'],
-                'global_max': d['max_date'],
-                'coverage_days': d['coverage_days'],
-                'unit': d.get('bucket_unit', 'day'),
-                'sample': d.get('sample'),
-                'buckets': d.get('buckets', [])
-            })
-
-    return {
-        'date_columns': [d['column'] for d in date_columns],
-        'interval_pairs': interval_pairs,
-        'singles': singles,
-        'details': date_columns
-    }
-
-
-# ============================================================================
 # GEOGRAPHIC DETECTION (optimized for any listed zones in config.py file)
 # ============================================================================
 
@@ -1439,10 +1153,10 @@ def inspect_csv_duckdb(filepath, gdf_metro, geo_key_patterns=None, wgs84_bounds=
     geo_key_cols = [k["col"] for k in geo_keys]
     geo_key_completeness = completeness_score_duckdb_cols(conn, "csv_data", geo_key_cols)
 
-    # Detect temporal/date columns
-    temporal_analysis = detect_date_columns_duckdb(conn, "csv_data")
-    if temporal_analysis:
-        print(f"[DuckDB] Date columns detected: {temporal_analysis['date_columns']}")
+    # Detect temporal/date columns (preliminary - full analysis done by analyze_datetime_columns)
+    date_cols_detected = detect_date_columns_duckdb(conn, "csv_data")
+    if date_cols_detected:
+        print(f"[DuckDB] Date columns detected: {date_cols_detected}")
 
     # Build base summary
     base_summary = {
@@ -1452,7 +1166,7 @@ def inspect_csv_duckdb(filepath, gdf_metro, geo_key_patterns=None, wgs84_bounds=
         "Nb colonnes": col_count,
         "Colonnes": {"_table": True, "data": build_columns_detail_duckdb(conn, "csv_data")},
         "Score de complétude global": completeness_score_duckdb(conn, "csv_data"),
-        "Analyse temporelle": temporal_analysis,
+        "Analyse temporelle": None,  # Will be populated by analyze_datetime_columns
         "Clés géographiques": format_geo_keys_table(geo_keys),
         "Géotransformation": res_geom['geotrans'],
         "Score de complétude des clés géographique": geo_key_completeness,
@@ -1857,7 +1571,12 @@ _INTERVAL_KEYWORDS = {
               "date_to", "valid_to", "fin_validite"],
 }
 
+
 def detect_date_columns_duckdb(conn, table_name):
+    """
+    Detect date columns in a DuckDB table by checking column types and values.
+    Returns a list of column names that appear to contain dates.
+    """
     schema = conn.execute(f"DESCRIBE {table_name}").fetchdf()
     date_cols = []
     for _, row in schema.iterrows():
@@ -2306,10 +2025,10 @@ def inspect_excel(filepath, gdf_metro, sample_size=5000, geo_key_patterns=None, 
     geo_key_cols = [k["col"] for k in geo_keys]
     geo_key_completeness = completeness_score_duckdb_cols(conn, "excel_data", geo_key_cols)
 
-    # Detect temporal/date columns
-    temporal_analysis = detect_date_columns_duckdb(conn, "excel_tbl")
-    if temporal_analysis:
-        print(f"[DuckDB] Date columns detected: {temporal_analysis['date_columns']}")
+    # Detect temporal/date columns (preliminary - full analysis done by analyze_datetime_columns)
+    date_cols_detected = detect_date_columns_duckdb(conn, "excel_tbl")
+    if date_cols_detected:
+        print(f"[DuckDB] Date columns detected: {date_cols_detected}")
 
     sheet_info = f"Feuilles: {len(sheet_names)}, analysée: {best_sheet}"
     if header_row > 0:
@@ -2322,7 +2041,7 @@ def inspect_excel(filepath, gdf_metro, sample_size=5000, geo_key_patterns=None, 
         "Nb colonnes": total_cols,
         "Colonnes": {"_table": True, "data": build_columns_detail_duckdb(conn, "excel_tbl")},
         "Score de complétude global": completeness_score_duckdb(conn, "excel_tbl"),
-        "Analyse temporelle": temporal_analysis,
+        "Analyse temporelle": None,  # Will be populated by analyze_datetime_columns
         "Clés géographiques": format_geo_keys_table(geo_keys),
         "Géotransformation": res_geom['geotrans'],
         "Score de complétude des clés géographique": geo_key_completeness,
@@ -2504,10 +2223,10 @@ def inspect_geospatial_duckdb(filepath, gdf_metro, geo_key_patterns=None, wgs84_
         geo_key_cols = [k["col"] for k in geo_keys]
         geo_key_completeness = completeness_score_duckdb_cols(conn, "geo_data", geo_key_cols)
 
-        # Detect temporal/date columns
-        temporal_analysis = detect_date_columns_duckdb(conn, "geo_data")
-        if temporal_analysis:
-            print(f"[DuckDB] Date columns detected: {temporal_analysis['date_columns']}")
+        # Detect temporal/date columns (preliminary - full analysis done by analyze_datetime_columns)
+        date_cols_detected = detect_date_columns_duckdb(conn, "geo_data")
+        if date_cols_detected:
+            print(f"[DuckDB] Date columns detected: {date_cols_detected}")
 
         completeness = completeness_score_duckdb(conn, "geo_data")
         columns_detail = build_columns_detail_duckdb(conn, "geo_data")
@@ -2603,7 +2322,7 @@ def inspect_geospatial_duckdb(filepath, gdf_metro, geo_key_patterns=None, wgs84_
             "Nb colonnes": col_count,
             "Colonnes": {"_table": True, "data": columns_detail},
             "Score de complétude global": completeness,
-            "Analyse temporelle": temporal_analysis,
+            "Analyse temporelle": None,  # Will be populated by analyze_datetime_columns
             "Clés géographiques": format_geo_keys_table(geo_keys),
             "Géotransformation": "Données géographiques",
             "Score de complétude des clés géographique": geo_key_completeness
