@@ -5,5 +5,5 @@ localisation:
   custom_reference_path: ''
 server:
   debug: false
-  host: 10.149.201.62
+  host: localhost #10.149.201.62
   port: 5050

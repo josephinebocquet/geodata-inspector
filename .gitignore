@@ -42,7 +42,6 @@ env/
 # data/
 *.csv
 *.xlsx
-*.geojson
 *.shp
 *.shx
 *.dbf
