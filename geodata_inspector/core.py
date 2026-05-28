@@ -95,7 +95,7 @@ def completeness_score_duckdb(conn, table_name):
     columns = conn.execute(f"DESCRIBE {table_name}").fetchdf()['column_name'].tolist()
 
     if not columns:
-        return {"Score de complétude moyen": 0, "Score de complétude std": 0}
+        return {"Score de complétude moyen": None, "Score de complétude std": None}
 
     # Build SQL for null counts per column
     null_counts_sql = ", ".join([
@@ -106,7 +106,7 @@ def completeness_score_duckdb(conn, table_name):
     result = conn.execute(f"SELECT {null_counts_sql} FROM {table_name}").fetchone()
 
     if result is None:
-        return {"Score de complétude moyen": 0, "Score de complétude std": 0}
+        return {"Score de complétude moyen": None, "Score de complétude std": None}
 
     null_ratios = [r for r in result if r is not None]
 
@@ -129,7 +129,7 @@ def completeness_score_duckdb(conn, table_name):
 def completeness_score_duckdb_cols(conn, table_name, columns):
     """Calculate completeness score restricted to a specific list of columns."""
     if not columns:
-        return {"_table": True, "data": [{"Score de complétude moyen (%)": 0, "Score de complétude std (%)": 0}]}
+        return {"_table": True, "data": [{"Score de complétude moyen (%)": None, "Score de complétude std (%)": None}]}
 
     null_counts_sql = ", ".join([
         f"SUM(CASE WHEN \"{col}\" IS NULL THEN 1 ELSE 0 END)::DOUBLE / COUNT(*)::DOUBLE as null_ratio_{i}"
@@ -139,7 +139,7 @@ def completeness_score_duckdb_cols(conn, table_name, columns):
     result = conn.execute(f"SELECT {null_counts_sql} FROM {table_name}").fetchone()
 
     if result is None:
-        return {"Score de complétude moyen": 0, "Score de complétude std": 0}
+        return {"Score de complétude moyen": None, "Score de complétude std": None}
 
     null_ratios = [r for r in result if r is not None]
     mean_completeness = 1 - np.mean(null_ratios)
@@ -293,7 +293,7 @@ def detect_geo_join_keys_duckdb(conn, table_name, geo_key_patterns=None):
             w_match = col_lc[match.start():match.end()]
             if is_numeric:
                 clean_len = conn.execute(f"""
-                    SELECT AVG(LENGTH(CAST(CAST("{col}" AS BIGINT) AS VARCHAR)))
+                    SELECT AVG(LENGTH(CAST(FLOOR(CAST("{col}" AS DOUBLE)) AS BIGINT)::VARCHAR))
                     FROM {table_name}
                     WHERE "{col}" IS NOT NULL
                 """).fetchone()[0] or 0
@@ -433,7 +433,7 @@ def get_geo_columns_duckdb(conn, table_name):
                                                 'geotrans': "Présence géométrie multiples (x1,y1), (x2,y2)"}
 
                     # Otherwise, simple Point pair
-                    return {**result, 'type': 'Point', 'method': 'points_from_xy', 'columns': [x_col, y_col], 'geotrans': "Présence géométrie multiples (x1,y1), (x2,y2)"}
+                    return {**result, 'type': 'Point', 'method': 'points_from_xy', 'columns': [x_col, y_col], 'geotrans': "Présence géométrie séparée (x,y)"}
 
     # Check for address columns
     for col in columns:
@@ -459,35 +459,27 @@ def get_geo_columns_duckdb(conn, table_name):
 # ============================================================================
 def guess_crs_from_coords_duckdb(conn, table_name, x_col, y_col):
     """
-    Guess CRS from coordinate columns using median values.
-    Same logic as guess_crs_from_bounds but for x,y columns.
+    Guess CRS from coordinate columns using score-based detection.
+    Fetches a sample and delegates to guess_crs_from_xy.
     """
     try:
-        result = conn.execute(f"""
-            SELECT
-                MEDIAN("{x_col}") as median_x,
-                MEDIAN("{y_col}") as median_y
+        df = conn.execute(f"""
+            SELECT "{x_col}" AS x, "{y_col}" AS y
             FROM {table_name}
             WHERE "{x_col}" IS NOT NULL AND "{y_col}" IS NOT NULL
-        """).fetchone()
-
-        median_x, median_y = result
-
-        if median_x is None or median_y is None:
+        """).fetchdf()
+        if df.empty:
             return None
-
-        # Same logic as original guess_crs_from_bounds
-        if -10 < median_x < 10 and 40 < median_y < 60:
-            return 4326  # WGS84
-        elif 100000 < median_x < 1300000 and 6000000 < median_y < 7400000:
-            return 2154  # Lambert 93
-        elif -2.2e6 < median_x < 2.2e6 and -2.2e6 < median_y < 2.2e6:
-            return 3857  # Web Mercator
-
+        epsg, conf, alts = guess_crs_from_xy(df["x"].values, df["y"].values)
+        if epsg is None:
+            epsg = alts[0] if alts else None
+            print(f"[CRS] Low-confidence detection — using best candidate EPSG:{epsg}. Alternatives: {alts}")
+        else:
+            print(f"[CRS] Detected EPSG:{epsg} (confidence={conf:.2f})")
+        return epsg
+    except Exception as e:
+        print(f"[CRS] guess_crs_from_coords_duckdb error: {e}")
         return None
-    except Exception:
-        return None
-
 
 # ============================================================================
 # SHARED PROJ STRINGS
@@ -502,6 +494,114 @@ PROJ_STRINGS = {
     5070:  '+proj=aea +lat_0=23 +lon_0=-96 +lat_1=29.5 +lat_2=45.5 +x_0=0 +y_0=0 +datum=NAD83 +units=m',
     2062:  '+proj=lcc +lat_1=40 +lat_2=40 +lat_0=40 +lon_0=-3 +x_0=2500000 +y_0=0 +ellps=intl +units=m',
 }
+
+# ============================================================================
+# CRS DETECTION — scoring-based approach
+# ============================================================================
+    
+# Loose area-of-use boxes: (min_lon, min_lat, max_lon, max_lat)
+_CANDIDATE_CRS = {
+    4326:  (-180, -90,  180,  90),
+    3857:  (-180, -85,  180,  85),
+    2154:  (  -6,  41,   10,  52),   # Lambert 93
+    27700: (  -9,  49,    3,  62),   # OSGB / British National Grid
+    3035:  ( -35,  25,   45,  85),   # ETRS89-LAEA Europe
+    25830: ( -12,  34,    0,  48),
+    25831: (  -6,  34,    6,  48),
+    25832: (   0,  34,   12,  84),
+    25833: (   6,  34,   18,  84),
+    32630: ( -12,   0,    0,  84),
+    32631: (  -6,   0,    6,  84),
+    32632: (   0,   0,   12,  84),
+    32633: (   6,   0,   18,  84),
+    5070:  (-180,  15, -50,  75),    # NAD83 Albers (US)
+    2062:  (  -9,  36,    5,  44),   # Madrid 1870 (Spain)
+}
+
+
+def _compute_xy_stats(xs, ys):
+    return {
+        "median_x":    float(np.median(xs)),
+        "median_y":    float(np.median(ys)),
+        "min_x":       float(xs.min()),  "max_x": float(xs.max()),
+        "min_y":       float(ys.min()),  "max_y": float(ys.max()),
+        "range_x":     float(xs.max() - xs.min()),
+        "range_y":     float(ys.max() - ys.min()),
+    }
+
+
+def _looks_like_degrees(st):
+    return (
+        -200 <= st["min_x"] and st["max_x"] <= 200 and
+        -100 <= st["min_y"] and st["max_y"] <= 100 and
+        st["range_x"] <= 60 and st["range_y"] <= 60
+    )
+
+
+def _looks_like_projected(st):
+    return (
+        1_000 <= abs(st["median_x"]) <= 20_000_000 and
+        1_000 <= abs(st["median_y"]) <= 20_000_000
+    )
+
+
+def _score_candidate(epsg, xs, ys, max_points=500):
+    from pyproj import Transformer, CRS as ProjCRS
+    if len(xs) > max_points:
+        idx = np.random.choice(len(xs), size=max_points, replace=False)
+        xs, ys = xs[idx], ys[idx]
+    try:
+        t = Transformer.from_crs(ProjCRS.from_epsg(epsg), ProjCRS.from_epsg(4326), always_xy=True)
+        lon, lat = t.transform(xs, ys)
+        lon, lat = np.asarray(lon), np.asarray(lat)
+    except Exception:
+        return -1e9
+    mask = np.isfinite(lon) & np.isfinite(lat) & (lon >= -180) & (lon <= 180) & (lat >= -90) & (lat <= 90)
+    lon, lat = lon[mask], lat[mask]
+    if lon.size == 0:
+        return -1e9
+    bbox_area = (lon.max() - lon.min()) * (lat.max() - lat.min())
+    area_score = 1.0 / (1.0 + bbox_area)
+    aoa = _CANDIDATE_CRS.get(epsg)
+    if aoa:
+        in_region = (lon.min() >= aoa[0] - 5 and lon.max() <= aoa[2] + 5 and
+                     lat.min() >= aoa[1] - 5 and lat.max() <= aoa[3] + 5)
+        region_score = 1.0 if in_region else 0.2
+    else:
+        region_score = 0.5
+    return 0.7 * region_score + 0.3 * area_score
+
+
+def guess_crs_from_xy(xs, ys, min_conf_gap=0.15):
+    """
+    Score-based CRS detection from raw coordinate arrays.
+    Returns (epsg: int | None, confidence: float, alternatives: list[int])
+    """
+    xs, ys = np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
+    xs, ys = xs[np.isfinite(xs)], ys[np.isfinite(ys)]
+    if xs.size == 0:
+        return None, 0.0, []
+
+    st = _compute_xy_stats(xs, ys)
+
+    if _looks_like_degrees(st):
+        return 4326, 1.0, [4326]
+
+    if not _looks_like_projected(st):
+        return None, 0.0, []
+
+    candidates = list(_CANDIDATE_CRS.keys())
+    scores = {epsg: _score_candidate(epsg, xs, ys) for epsg in candidates}
+    ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best_epsg, best_score = ordered[0]
+    second_score = ordered[1][1] if len(ordered) > 1 else -1e9
+
+    if best_score - second_score < min_conf_gap or best_score <= 0:
+        return None, float(best_score), [e for e, _ in ordered[:3]]
+
+    return int(best_epsg), float(best_score), [e for e, _ in ordered[:3]]
+
+
 
 
 def process_geometry_duckdb_points(conn, table_name, x_col, y_col, gdf_metro, wgs84_bounds=None, metric_crs=None):
@@ -651,33 +751,28 @@ def process_geometry_duckdb_linestrings(conn, table_name, x_start, y_start, x_en
 
 def guess_crs_from_bounds_duckdb(conn, table_name, geom_col):
     """
-    Guess CRS from bounding box coordinates using DuckDB.
-    Same logic as the original guess_crs_from_bounds function.
+    Guess CRS from a geometry column using score-based detection.
+    Extracts centroid coordinates and delegates to guess_crs_from_xy.
+    Only used as fallback when CRS metadata is absent from the file.
     """
     try:
-        # Get median coordinates
-        result = conn.execute(f"""
+        df = conn.execute(f"""
             SELECT
-                MEDIAN(ST_X(ST_Centroid("{geom_col}"))) as median_x,
-                MEDIAN(ST_Y(ST_Centroid("{geom_col}"))) as median_y
+                ST_X(ST_Centroid("{geom_col}")) AS x,
+                ST_Y(ST_Centroid("{geom_col}")) AS y
             FROM {table_name}
             WHERE "{geom_col}" IS NOT NULL
-        """).fetchone()
-
-        median_x, median_y = result
-
-        if median_x is None or median_y is None:
+        """).fetchdf()
+        if df.empty:
             return None
-
-        if -10 < median_x < 10 and 40 < median_y < 60:
-            return 4326  # WGS84
-        elif 100000 < median_x < 1300000 and 6000000 < median_y < 7400000:
-            return 2154  # Lambert 93
-        elif -2.2e6 < median_x < 2.2e6 and -2.2e6 < median_y < 2.2e6:
-            return 3857  # Web Mercator
-
-        return None
-    except Exception:
+        epsg, conf, alts = guess_crs_from_xy(df["x"].values, df["y"].values)
+        if epsg is None:
+            print(f"[CRS] Low-confidence detection. Top candidates: {alts}")
+        else:
+            print(f"[CRS] Detected EPSG:{epsg} (confidence={conf:.2f})")
+        return epsg
+    except Exception as e:
+        print(f"[CRS] guess_crs_from_bounds_duckdb error: {e}")
         return None
 
 
@@ -702,12 +797,21 @@ def process_geometry_duckdb_native(conn, table_name, geom_col, gdf_metro, wgs84_
     """).fetchone()
     geom_type = geom_type_result[0] if geom_type_result else "GEOMETRY"
 
-    # Detect CRS
-    detected_crs = guess_crs_from_bounds_duckdb(conn, table_name, geom_col)
-    if detected_crs is None:
-        print(f"[DuckDB Spatial] No CRS detected, keeping as-is")
+    try:
+        crs_result = conn.execute(f"""
+            SELECT ST_SRID("{geom_col}") FROM {table_name}
+            WHERE "{geom_col}" IS NOT NULL LIMIT 1
+        """).fetchone()
+        detected_crs = crs_result[0] if crs_result and crs_result[0] != 0 else None
+    except Exception:
+        detected_crs = None
+    
+    if detected_crs:
+        print(f"[DuckDB Spatial] CRS read from file metadata: EPSG:{detected_crs}")
     else:
-        print(f"[DuckDB Spatial] Detected CRS: EPSG:{detected_crs}")
+        # Fallback for files with missing CRS metadata
+        detected_crs = guess_crs_from_bounds_duckdb(conn, table_name, geom_col)
+        print(f"[DuckDB Spatial] CRS guessed from coordinates: EPSG:{detected_crs}")
 
     # No reprojection — keep geometry in source CRS
     ## if metric_crs and detected_crs and detected_crs != metric_crs:
@@ -790,13 +894,39 @@ def _compute_spatial_metrics_duckdb(conn, table_name, geom_type, gdf_metro, star
 
     hull_row = conn.execute(f"""
     SELECT
-        ST_AsText(ST_Envelope_Agg(geom)) AS hull_wkt,
-        ST_Area(ST_Envelope_Agg(geom)) / 1e6 AS hull_area_km2
+        ST_AsText(ST_Envelope_Agg(geom)) AS hull_wkt
     FROM {table_name}
     """).fetchone()
 
     hull_wkt = hull_row[0] if hull_row and hull_row[0] is not None else None
-    hull_area_km2 = hull_row[1] if hull_row and hull_row[1] is not None else 0
+
+    # Compute area in km² using a metric CRS — DuckDB area is in source CRS units
+    # which are degrees² for WGS84, making it meaningless without reprojection
+    hull_area_km2 = 0
+    if hull_wkt:
+        try:
+            from shapely import wkt as shapely_wkt
+            hull_geom_raw = shapely_wkt.loads(hull_wkt)
+            # Pick an appropriate metric CRS for the area calculation
+            # Use the source CRS if already metric, otherwise reproject to a suitable one
+            METRIC_CRS_FOR_AREA = {
+                4326:  3857,   # WGS84 → Web Mercator (good enough for area estimates)
+                27700: 27700,  # British National Grid — already metric
+                25832: 25832,  # UTM 32N — already metric
+                3035:  3035,   # ETRS89-LAEA — already metric
+                5070:  5070,   # NAD83 Albers — already metric
+                2062:  2062,   # Madrid — already metric
+                2154:  2154,   # Lambert 93 — already metric
+            }
+            area_crs = METRIC_CRS_FOR_AREA.get(source_crs, 3857) if source_crs else 3857
+            if source_crs and source_crs != area_crs:
+                hull_gs = gpd.GeoSeries([hull_geom_raw], crs=f"EPSG:{source_crs}").to_crs(epsg=area_crs)
+                hull_area_km2 = hull_gs.iloc[0].area / 1e6
+            else:
+                hull_area_km2 = hull_geom_raw.area / 1e6
+        except Exception as e:
+            print(f"[DuckDB Spatial] Hull area calculation error: {e}")
+            hull_area_km2 = 0
 
     # Compute bounding box
     bbox = conn.execute(f"""
@@ -811,7 +941,7 @@ def _compute_spatial_metrics_duckdb(conn, table_name, geom_type, gdf_metro, star
         area_km2 = hull_area_km2
         complexity = "None : POINT"
 
-    elif 'LINESTRING' or 'LINE' in geom_type.upper():
+    elif 'LINESTRING' in geom_type.upper() or 'LINE' in geom_type.upper():
         area_km2 = hull_area_km2
         complexity_result = conn.execute(f"""
             SELECT AVG(ST_NPoints(geom)) FROM {table_name}
@@ -848,8 +978,9 @@ def _compute_spatial_metrics_duckdb(conn, table_name, geom_type, gdf_metro, star
     """).fetchone()
     dup_pct = (dup_result[0] - dup_result[1]) / dup_result[0] * 100 if dup_result[0] > 0 else 0
 
-    # Compute fill rate (area vs bounding box area)
-    bbox_area = (maxx - minx) * (maxy - miny) / 1e6 if (maxx > minx and maxy > miny) else 0
+    # bbox_area must use the same metric hull for consistency
+    # Re-use hull_area_km2 as the bbox approximation (envelope already is the bbox)
+    bbox_area = hull_area_km2  # hull is the envelope
     fill_rate = (area_km2 / bbox_area * 100) if bbox_area > 0 else 0
 
     # Compute coverage against reference using precomputed hull_wkt
@@ -881,7 +1012,11 @@ def _compute_spatial_metrics_duckdb(conn, table_name, geom_type, gdf_metro, star
     display_geom_type = geom_type.replace("ST_", "").title()
 
     return {
-        "Score de complétude géographique": f"présentes: {round(non_empty/total, 2)*100}, valides: {round(valid_count/total, 2)*100}",
+        "Score de complétude géographique": {
+            "_table": True,
+            "data": [{
+                "Présentes (%)": round(non_empty / total * 100, 1),
+                "Valides (%)":   round(valid_count / total * 100, 1)}]},
         "CRS": f"EPSG:{source_crs}" if source_crs else "Unknown",
         "Types de géométrie": display_geom_type,
         "Emprise estimée (km2)": round(area_km2, 2),
@@ -889,7 +1024,7 @@ def _compute_spatial_metrics_duckdb(conn, table_name, geom_type, gdf_metro, star
         "Taux de remplissage géométrique (%)": round(fill_rate, 2),
         "Complexité moyenne des géométries": complexity,
         "Part des geometries dupliquees (%)": round(dup_pct, 2),
-        "Couverture territoriale hexagonale (%)": round(coverage_pct, 2),
+        "Couverture territoriale (%)": round(coverage_pct, 2),
     }
 
 
@@ -936,6 +1071,56 @@ def inspect_csv_duckdb(filepath, gdf_metro, geo_key_patterns=None, wgs84_bounds=
 
     read_time = time.time() - start_time
     print(f"[DuckDB] CSV read in {read_time:.2f}s")
+    
+    # ── Detect and fix misparsed date columns ────────────────────────────
+    # Strategy: read raw file with pandas to find ALL date-like columns,
+    # then force them all to VARCHAR in DuckDB from the start.
+    bad_date_cols = []
+    try:
+        with open(filepath, 'rb') as _f:
+            _first = _f.read(2048).decode('utf-8', errors='replace')
+        _sep = ';' if _first.count(';') > _first.count(',') else ','
+        df_probe = pd.read_csv(filepath, nrows=3, dtype=str,
+                               sep=_sep, encoding='utf-8-sig', encoding_errors='replace')
+        for col in df_probe.columns:
+            vals = df_probe[col].dropna()
+            if vals.empty:
+                continue
+            s = str(vals.iloc[0]).strip()
+            if re.match(r'^\d{2}/\d{2}/\d{4}', s) or \
+               re.match(r'^\d{2}-\d{2}-\d{4}', s):
+                bad_date_cols.append(col)
+    except Exception as e:
+        print(f"[DateTime] Probe read failed: {e}")
+
+    if bad_date_cols:
+        print(f"[DateTime] Ambiguous date columns detected: {bad_date_cols} — forcing VARCHAR")
+        col_types = ", ".join([f'"{c}": "VARCHAR"' for c in bad_date_cols])
+        conn.execute("DROP TABLE IF EXISTS csv_data")
+        try:
+            conn.execute(f"""
+                CREATE TABLE csv_data AS
+                SELECT * FROM read_csv('{filepath}',
+                    header=true,
+                    auto_detect=true,
+                    ignore_errors=true,
+                    sample_size=100000,
+                    types={{{col_types}}}
+                )
+            """)
+            print(f"[DateTime] Re-read done, forced VARCHAR for: {bad_date_cols}")
+        except Exception as e:
+            print(f"[DateTime] Re-read failed: {e}")
+            conn.execute(f"""
+                CREATE TABLE csv_data AS
+                SELECT * FROM read_csv('{filepath}',
+                    header=true,
+                    all_varchar=true,
+                    ignore_errors=true
+                )
+            """)
+    # ─────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────
 
     # Get row and column counts
     row_count = conn.execute("SELECT COUNT(*) FROM csv_data").fetchone()[0]
@@ -1021,7 +1206,12 @@ def inspect_csv_duckdb(filepath, gdf_metro, geo_key_patterns=None, wgs84_bounds=
             geo_summary = geo_metrics
             base_summary["Type de fichier"] = "CSV with Geometry (DuckDB)"
             last_gdf = gdf_proj
-
+    
+    # --- DateTime analysis ---
+    datetime_analysis = analyze_datetime_columns(conn, "csv_data", raw_filepath=filepath)
+    if datetime_analysis:
+        base_summary["Analyse temporelle"] = datetime_analysis
+        
     conn.close()
 
     total_time = time.time() - start_time
@@ -1046,8 +1236,8 @@ def find_best_data_sheet(wb, sheet_names):
     """Find the sheet most likely to contain data."""
     if len(sheet_names) == 1:
         return sheet_names[0]
-
-    metadata_patterns = ['readme', 'lisez', 'info', 'indic', 'description', 'metadata', 'note', 'about', 'legend', 'source']
+        
+    metadata_patterns = ['readme', 'lisez', 'info', 'indic', 'description', 'metadata', 'note', 'about', 'legend', 'source', 'rapport']
     data_patterns = ['data', 'donnee', 'donnée', 'tableau', 'main', 'result', 'mesure', 'values', 'export']
 
     best_sheet = sheet_names[0]
@@ -1063,8 +1253,9 @@ def find_best_data_sheet(wb, sheet_names):
         if any(p in name_lower for p in data_patterns):
             score += 10
 
-        score += min((ws.max_row or 0) / 100, 50)
-        score += min(ws.max_column or 0, 20)
+        # score += min((ws.max_row or 0) / 100, 50)
+        # score += min(ws.max_column or 0, 20)
+        score += min((ws.max_row or 0) / 10, 100)
 
         if score > best_score:
             best_score = score
@@ -1331,7 +1522,370 @@ def detect_granularite(geo_keys, geo_summary):
             granularites.append("Région")
 
     return " + ".join(granularites) if granularites else "Inconnue"
+    
+# ============================================================================
+# DATETIME ANALYSIS
+# ============================================================================
 
+# Semantic keywords for interval pair detection
+_INTERVAL_KEYWORDS = {
+    "start": ["debut", "début", "start", "from", "ouverture", "open",
+              "début_periode", "date_deb", "datedeb", "date_debut", "date_début", "datedébut", "datedéb"
+              "date_from", "valid_from", "debut_validite"],
+    "end":   ["fin", "end", "to", "fermeture", "close",
+              "fin_periode", "date_fin", "datefin",
+              "date_to", "valid_to", "fin_validite"],
+}
+
+def detect_date_columns_duckdb(conn, table_name):
+    schema = conn.execute(f"DESCRIBE {table_name}").fetchdf()
+    date_cols = []
+    for _, row in schema.iterrows():
+        col = row["column_name"]
+        t = row["column_type"].upper()
+        if any(k in t for k in ("DATE", "TIMESTAMP", "TIME")):
+            date_cols.append(col)
+            continue
+        # Also detect VARCHAR columns that look like dates
+        if "VARCHAR" in t or "TEXT" in t:
+            try:
+                sample = conn.execute(f"""
+                    SELECT CAST("{col}" AS VARCHAR) FROM {table_name}
+                    WHERE "{col}" IS NOT NULL LIMIT 1
+                """).fetchone()
+                if sample and sample[0]:
+                    s = str(sample[0]).strip()
+                    if re.match(r'^\d{2}/\d{2}/\d{4}', s) or \
+                       re.match(r'^\d{4}[-/]\d{2}[-/]\d{2}', s):
+                        date_cols.append(col)
+            except Exception:
+                continue
+    return date_cols
+
+
+def classify_date_columns(date_cols):
+    """
+    Classify date columns into:
+      - interval_pairs: [(col_start, col_end), ...]   → occupancy curve
+      - singles:        [col, ...]                    → histogram
+
+    Pair detection is purely semantic (column name keywords).
+    Unpaired columns go to singles.
+    """
+    paired = set()
+    interval_pairs = []
+
+    cols_lower = {c: c.lower().replace(" ", "_") for c in date_cols}
+
+    for col_s in date_cols:
+        if col_s in paired:
+            continue
+        lc_s = cols_lower[col_s]
+        if not any(kw in lc_s for kw in _INTERVAL_KEYWORDS["start"]):
+            continue
+
+        # Try to find a matching end column
+        for col_e in date_cols:
+            if col_e in paired or col_e == col_s:
+                continue
+            lc_e = cols_lower[col_e]
+            if not any(kw in lc_e for kw in _INTERVAL_KEYWORDS["end"]):
+                continue
+
+            # Bonus: check they share a common root (e.g. "date_deb" / "date_fin")
+            # by stripping the start/end keyword and comparing stems
+            stem_s = lc_s
+            stem_e = lc_e
+            for kw in _INTERVAL_KEYWORDS["start"]:
+                stem_s = stem_s.replace(kw, "")
+            for kw in _INTERVAL_KEYWORDS["end"]:
+                stem_e = stem_e.replace(kw, "")
+            stem_s = stem_s.strip("_")
+            stem_e = stem_e.strip("_")
+
+            if stem_s == stem_e or len(stem_s) == 0 or len(stem_e) == 0:
+                interval_pairs.append((col_s, col_e))
+                paired.add(col_s)
+                paired.add(col_e)
+                break  # one match per start column
+
+    singles = [c for c in date_cols if c not in paired]
+    return interval_pairs, singles
+
+
+def compute_occupancy_curve(conn, table_name, col_start, col_end, n_buckets=100, raw_formats=None):
+    """
+    Compute an occupancy curve for an interval pair (col_start, col_end).
+    """
+    raw_formats = raw_formats or {}
+
+    def ts(col):
+        fmt = raw_formats.get(col)
+        if fmt is None:
+            # Explicitly set to None = already correctly typed by DuckDB
+            return f'CAST("{col}" AS TIMESTAMP)'
+        if fmt:
+            return f"TRY_STRPTIME(CAST(\"{col}\" AS VARCHAR), '{fmt}')"
+        # Key absent = unknown, fallback to CAST
+        return f'CAST("{col}" AS TIMESTAMP)'
+
+    # --- Global temporal extent ---
+    print(f"[DateTime] raw_formats={raw_formats}, ts(col_start)={ts(col_start)}, ts(col_end)={ts(col_end)}")
+    # Verify TRY_STRPTIME works on a sample
+    sample_check = conn.execute(f"""
+        SELECT {ts(col_start)}, {ts(col_end)}
+        FROM {table_name}
+        WHERE "{col_start}" IS NOT NULL AND "{col_end}" IS NOT NULL
+        LIMIT 3
+    """).fetchall()
+    print(f"[DateTime] sample parsed values: {sample_check}")
+    
+    extent = conn.execute(f"""
+        SELECT
+            MIN({ts(col_start)}) AS t_min,
+            MAX({ts(col_end)})   AS t_max
+        FROM {table_name}
+        WHERE "{col_start}" IS NOT NULL
+          AND "{col_end}"   IS NOT NULL
+          AND YEAR({ts(col_start)}) >= 1800
+          AND YEAR({ts(col_end)})   >= 1800
+    """).fetchone()
+
+    if extent is None or extent[0] is None or extent[1] is None:
+        return None
+
+    t_min, t_max = extent
+    print(f"[DateTime] extent: t_min={t_min}, t_max={t_max}")
+    coverage_days = (t_max - t_min).days if hasattr(t_max - t_min, "days") else 0
+
+    # --- Choose time unit for the axis ---
+    if coverage_days > 365:
+        unit = "year"
+    elif coverage_days > 31:
+        unit = "month"
+    else:
+        unit = "day"
+
+    # --- Median interval duration ---
+    med_result = conn.execute(f"""
+        SELECT MEDIAN(
+            DATEDIFF('day', {ts(col_start)}, {ts(col_end)})
+        )
+        FROM {table_name}
+        WHERE "{col_start}" IS NOT NULL
+          AND "{col_end}"   IS NOT NULL
+          AND YEAR({ts(col_start)}) >= 1800
+          AND YEAR({ts(col_end)})   >= 1800
+          AND {ts(col_end)} >= {ts(col_start)}
+    """).fetchone()
+
+    median_duration_days = float(med_result[0]) if med_result and med_result[0] is not None else 0
+
+    # Intervalles <= 1 jour = mesures ponctuelles → histogramme simple
+    if median_duration_days <= 1:
+        result = compute_single_date_histogram(conn, table_name, col_start,
+                                               n_buckets=n_buckets, raw_formats=raw_formats)
+        if result:
+            # Keep col_start/col_end so the JS renderer knows the pair origin
+            result["col_start"] = col_start
+            result["col_end"] = col_end
+        return result
+
+    # --- Build bucket time axis ---
+    step_days = max(1, coverage_days // n_buckets)
+
+    conn.execute(f"""
+        CREATE OR REPLACE TEMP TABLE _time_axis AS
+        SELECT
+            TIMESTAMP '{t_min.isoformat()}' + (INTERVAL 1 DAY * CAST(generate_series * {step_days} AS BIGINT)) AS bucket_ts
+        FROM generate_series(0, {n_buckets})
+    """)
+
+    # --- Count active rows per bucket ---
+    conn.execute(f"""
+        CREATE OR REPLACE TEMP TABLE _occupancy AS
+        SELECT
+            a.bucket_ts,
+            COUNT(d."{col_start}") AS active_count
+        FROM _time_axis a
+        LEFT JOIN {table_name} d
+            ON {ts(col_start)} <= a.bucket_ts
+           AND {ts(col_end)}   >= a.bucket_ts
+           AND d."{col_start}" IS NOT NULL
+           AND d."{col_end}"   IS NOT NULL
+           AND YEAR({ts(col_start)}) >= 1800
+           AND YEAR({ts(col_end)})   >= 1800
+        GROUP BY a.bucket_ts
+        ORDER BY a.bucket_ts
+    """)
+
+    rows = conn.execute("SELECT bucket_ts, active_count FROM _occupancy").fetchall()
+
+    conn.execute("DROP TABLE IF EXISTS _time_axis")
+    conn.execute("DROP TABLE IF EXISTS _occupancy")
+
+    buckets = [
+        {"t": row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0]),
+         "count": int(row[1])}
+        for row in rows
+    ]
+
+    return {
+        "col_start": col_start,
+        "col_end":   col_end,
+        "global_min": t_min.isoformat(),
+        "global_max": t_max.isoformat(),
+        "coverage_days": coverage_days,
+        "unit": unit,
+        "median_duration_days": round(median_duration_days, 1),
+        "chart_type": "occupancy",
+        "buckets": buckets,
+    }
+    
+def compute_single_date_histogram(conn, table_name, col, n_buckets=50, raw_formats=None):
+    """
+    Compute a histogram (count per time unit) for a single date column.
+    Unit is adaptive: year / month / day depending on coverage.
+    """
+    raw_formats = raw_formats or {}
+
+    def ts(col):
+        fmt = raw_formats.get(col)
+        if fmt is None:
+            # Explicitly set to None = already correctly typed by DuckDB
+            return f'CAST("{col}" AS TIMESTAMP)'
+        if fmt:
+            return f"TRY_STRPTIME(CAST(\"{col}\" AS VARCHAR), '{fmt}')"
+        # Key absent = unknown, fallback to CAST
+        return f'CAST("{col}" AS TIMESTAMP)'
+
+    extent = conn.execute(f"""
+        SELECT
+            MIN({ts(col)}) AS t_min,
+            MAX({ts(col)}) AS t_max
+        FROM {table_name}
+        WHERE "{col}" IS NOT NULL
+        AND YEAR({ts(col)}) >= 1800
+    """).fetchone()
+
+    if extent is None or extent[0] is None or extent[1] is None:
+        return None
+
+    t_min, t_max = extent
+    print(f"[DateTime] extent: t_min={t_min}, t_max={t_max}")
+    
+    coverage_days = (t_max - t_min).days if hasattr(t_max - t_min, "days") else 0
+
+    if coverage_days > 365 * 2:
+        trunc_unit, unit = "year", "year"
+    elif coverage_days > 60:
+        trunc_unit, unit = "month", "month"
+    else:
+        trunc_unit, unit = "day", "day"
+
+    rows = conn.execute(f"""
+        SELECT
+            DATE_TRUNC('{trunc_unit}', {ts(col)}) AS period,
+            COUNT(*) AS cnt
+        FROM {table_name}
+        WHERE "{col}" IS NOT NULL
+        AND YEAR({ts(col)}) >= 1800
+        GROUP BY period
+        ORDER BY period
+    """).fetchall()
+
+    buckets = [
+        {"t": row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0]),
+         "count": int(row[1])}
+        for row in rows
+    ]
+
+    return {
+        "col": col,
+        "global_min": t_min.isoformat(),
+        "global_max": t_max.isoformat(),
+        "coverage_days": coverage_days,
+        "unit": unit,
+        "chart_type": "histogram",
+        "buckets": buckets,
+    }
+
+
+def analyze_datetime_columns(conn, table_name, raw_filepath=None):
+    """
+    Full datetime analysis for a table already loaded in DuckDB.
+    Returns a dict with:
+      - date_columns: list of all detected date column names
+      - interval_pairs: list of occupancy curve results
+      - singles: list of histogram results
+    """
+    date_cols = detect_date_columns_duckdb(conn, table_name)
+    if not date_cols:
+        return None
+
+    # Pre-detect raw string formats from file before DuckDB parsing corrupts them
+    raw_formats = {}
+    if raw_filepath:
+        try:
+            # Detect separator from first line to avoid misparse
+            with open(raw_filepath, 'rb') as _f:
+                _first = _f.read(2048).decode('utf-8', errors='replace')
+            _sep = ';' if _first.count(';') > _first.count(',') else ','
+            df_raw = pd.read_csv(raw_filepath, nrows=5, dtype=str,
+                                 sep=_sep, encoding='utf-8-sig', encoding_errors='replace')
+            
+            # Get DuckDB column types to know which are already typed
+            schema = conn.execute(f"DESCRIBE {table_name}").fetchdf()
+            duckdb_types = dict(zip(schema['column_name'], schema['column_type']))
+
+            for col in date_cols:
+                col_type = duckdb_types.get(col, '').upper()
+                already_typed = any(k in col_type for k in ('DATE', 'TIMESTAMP'))
+
+                if already_typed:
+                    # DuckDB parsed it correctly — no strptime needed
+                    raw_formats[col] = None
+                    continue
+
+                if col in df_raw.columns:
+                    vals = df_raw[col].dropna()
+                    if vals.empty:
+                        continue
+                    s = vals.iloc[0].strip()
+                    if re.match(r'^\d{2}/\d{2}/\d{4}', s):
+                        raw_formats[col] = '%d/%m/%Y'
+                    elif re.match(r'^\d{4}/\d{2}/\d{2} \d{2}:\d{2}', s):
+                        raw_formats[col] = '%Y/%m/%d %H:%M:%S'
+                    elif re.match(r'^\d{4}/\d{2}/\d{2}', s):
+                        raw_formats[col] = '%Y/%m/%d'
+                    elif re.match(r'^\d{2}-\d{2}-\d{4}', s):
+                        raw_formats[col] = '%d-%m-%Y'
+            print(f"[DateTime] df_raw columns: {df_raw.columns.tolist()}")
+            print(f"[DateTime] date_cols from DuckDB: {date_cols}")
+            print(f"[DateTime] raw_formats built: {raw_formats}")
+            
+        except Exception as e:
+            print(f"[DateTime] Raw format detection failed: {e}")
+
+    interval_pairs_meta, singles_meta = classify_date_columns(date_cols)
+    interval_results = []
+    for col_s, col_e in interval_pairs_meta:
+        result = compute_occupancy_curve(conn, table_name, col_s, col_e, raw_formats=raw_formats)
+        if result:
+            interval_results.append(result)
+
+    single_results = []
+    for col in singles_meta:
+        result = compute_single_date_histogram(conn, table_name, col, raw_formats=raw_formats)
+        if result:
+            single_results.append(result)
+
+    return {
+            "_datetime": True,          # ← marqueur pour le renderer HTML
+            "date_columns": date_cols,
+            "interval_pairs": interval_results,
+            "singles": single_results,
+        }
 
 def inspect_excel(filepath, gdf_metro, sample_size=5000, geo_key_patterns=None, wgs84_bounds=None, metric_crs=None):
     """
@@ -1401,10 +1955,30 @@ def inspect_excel(filepath, gdf_metro, sample_size=5000, geo_key_patterns=None, 
 
     if res_geom is None:
         res_geom = get_geo_columns(df)
-
+        
+    # ── Detect ambiguous date columns before DuckDB ingestion ────────────
+    excel_bad_date_cols = []
+    try:
+        df_probe = pd.read_excel(filepath, sheet_name=best_sheet,
+                                 header=header_row, nrows=3, dtype=str, engine='openpyxl')
+        df_probe.columns = [str(c).replace('\r\n', ' ').replace('\n', ' ').strip()
+                            for c in df_probe.columns]
+        for col in df_probe.columns:
+            vals = df_probe[col].dropna()
+            if vals.empty:
+                continue
+            s = str(vals.iloc[0]).strip()
+            if re.match(r'^\d{2}/\d{2}/\d{4}', s) or \
+               re.match(r'^\d{2}-\d{2}-\d{4}', s):
+                excel_bad_date_cols.append(col)
+    except Exception as e:
+        print(f"[DateTime] Excel probe read failed: {e}")
+    # ─────────────────────────────────────────────────────────────────────
+    
     conn = get_duckdb_connection()
     conn.register('excel_data', df)
     conn.execute("CREATE TABLE excel_tbl AS SELECT * FROM excel_data")
+    
 
     geo_keys = detect_geo_join_keys_duckdb(conn, "excel_data", geo_key_patterns=geo_key_patterns)
     res_geom = get_geo_columns_duckdb(conn, "excel_data")
@@ -1441,6 +2015,16 @@ def inspect_excel(filepath, gdf_metro, sample_size=5000, geo_key_patterns=None, 
 
         # Sample from geo_processed (already filtered, never reprojected)
         try:
+            #### DEBUG 
+            print(f"[DEBUG] geo_summary after points: {geo_summary.get('CRS')}, {geo_summary.get('Types de géométrie')}")
+            try:
+                tables = conn.execute("SHOW TABLES").fetchdf()
+                print(f"[DEBUG] tables in conn: {tables['name'].tolist()}")
+                count = conn.execute("SELECT COUNT(*) FROM geo_processed").fetchone()[0]
+                print(f"[DEBUG] geo_processed row count: {count}")
+            except : 
+                print('error')
+            #### DEBUG 
             sample_wkt = conn.execute("""
                 SELECT ST_AsText(geom) as wkt FROM geo_processed
                 USING SAMPLE 1000
@@ -1484,7 +2068,13 @@ def inspect_excel(filepath, gdf_metro, sample_size=5000, geo_key_patterns=None, 
             geo_summary = geo_metrics
             base_summary["Type de fichier"] = f"EXCEL with Geometry (DuckDB) ({sheet_info})"
             last_gdf = gdf_proj
+            
+    # --- DateTime analysis ---
+    datetime_analysis = analyze_datetime_columns(conn, "excel_tbl", raw_filepath=filepath)
 
+    if datetime_analysis:
+        base_summary["Analyse temporelle"] = datetime_analysis
+        
     conn.close()
 
     total_time = time.time() - start_time
@@ -1515,11 +2105,52 @@ def inspect_geospatial_duckdb(filepath, gdf_metro, geo_key_patterns=None, wgs84_
     conn = get_duckdb_connection()
 
     try:        
+
+        # ── Detect ambiguous date columns before DuckDB ingestion ────────────
+        geo_bad_date_cols = []
+        try:
+            with open(filepath, 'rb') as _f:
+                _first = _f.read(2048).decode('utf-8', errors='replace')
+            _sep = ';' if _first.count(';') > _first.count(',') else ','
+            df_probe = pd.read_csv(filepath, nrows=3, dtype=str,
+                                   sep=_sep, encoding_errors='replace')
+            for col in df_probe.columns:
+                vals = df_probe[col].dropna()
+                if vals.empty:
+                    continue
+                s = str(vals.iloc[0]).strip()
+                if re.match(r'^\d{2}/\d{2}/\d{4}', s) or \
+                   re.match(r'^\d{2}-\d{2}-\d{4}', s):
+                    geo_bad_date_cols.append(col)
+        except Exception as e:
+            print(f"[DateTime] Geospatial probe read failed: {e}")
+        # ─────────────────────────────────────────────────────────────────────
+        
         conn.execute(f"""
             CREATE TABLE geo_data AS
             SELECT * FROM st_read('{filepath}')
         """)
-
+        # Only re-read if ambiguous date cols detected AND it's a CSV-like format
+        ext = os.path.splitext(filepath)[-1].lower()
+        if geo_bad_date_cols and ext in ('.csv', '.txt'):
+            print(f"[DateTime] Geospatial ambiguous date columns: {geo_bad_date_cols} — forcing VARCHAR")
+            col_types = ", ".join([f'"{c}": "VARCHAR"' for c in geo_bad_date_cols])
+            conn.execute("DROP TABLE IF EXISTS geo_data")
+            try:
+                conn.execute(f"""
+                    CREATE TABLE geo_data AS
+                    SELECT * FROM read_csv('{filepath}',
+                        header=true,
+                        auto_detect=true,
+                        ignore_errors=true,
+                        sample_size=100000,
+                        types={{{col_types}}}
+                    )
+                """)
+                print(f"[DateTime] Geospatial re-read done, forced VARCHAR for: {geo_bad_date_cols}")
+            except Exception as e:
+                print(f"[DateTime] Geospatial re-read failed: {e}")
+            
         read_time = time.time() - start_time
         print(f"[DuckDB] Geospatial file read in {read_time:.2f}s")
 
@@ -1556,7 +2187,34 @@ def inspect_geospatial_duckdb(filepath, gdf_metro, geo_key_patterns=None, wgs84_
         else:
             geo_summary = get_default_geo_summary()
 
+        # # Create sample GeoDataFrame for map display
+        # try:
+        #     sample_wkt = conn.execute("""
+        #         SELECT ST_AsText(geom) as wkt FROM geo_processed
+        #         USING SAMPLE 1000
+        #     """).fetchdf()
+
+        #     if len(sample_wkt) > 0:
+        #         from shapely import wkt as shapely_wkt
+        #         geometries = [shapely_wkt.loads(w) for w in sample_wkt['wkt'] if w]
+        #         # Geometry is never reprojected — use detected source CRS
+        #         import re as _re
+        #         _crs_match = _re.search(r"EPSG:(\d+)", geo_summary.get("CRS", ""))
+        #         detected_native_crs = int(_crs_match.group(1)) if _crs_match else (
+        #             guess_crs_from_bounds_duckdb(conn, "geo_processed", "geom") or 4326
+        #         )
+        #         print(f"[DEBUG] detected_native_crs = {detected_native_crs}")
+        #         last_gdf = gpd.GeoDataFrame(geometry=geometries, crs=f"EPSG:{detected_native_crs}").to_crs(epsg=4326)
+                
+        # except Exception as e:
+        #     print(f"[DuckDB] Sample GeoDataFrame creation error: {e}")
+        #     gdf = gpd.read_file(filepath)
+        #     if len(gdf) > 1000:
+        #         gdf = gdf.sample(n=1000, random_state=42)
+        #     last_gdf = gdf
+        
         # Create sample GeoDataFrame for map display
+
         try:
             sample_wkt = conn.execute("""
                 SELECT ST_AsText(geom) as wkt FROM geo_processed
@@ -1566,17 +2224,45 @@ def inspect_geospatial_duckdb(filepath, gdf_metro, geo_key_patterns=None, wgs84_
             if len(sample_wkt) > 0:
                 from shapely import wkt as shapely_wkt
                 geometries = [shapely_wkt.loads(w) for w in sample_wkt['wkt'] if w]
-                # Geometry is never reprojected — use detected source CRS
-                detected_native_crs = guess_crs_from_bounds_duckdb(conn, "geo_processed", "geom") or 4326
+                temp_gdf = gpd.GeoDataFrame(geometry=geometries)
+                bounds = temp_gdf.total_bounds  # [minx, miny, maxx, maxy]
+                median_x = (bounds[0] + bounds[2]) / 2
+                median_y = (bounds[1] + bounds[3]) / 2
+                print(f"[DEBUG] last_gdf median_x={median_x:.1f}, median_y={median_y:.1f}")
+                # if -10 < median_x < 10 and 40 < median_y < 60:
+                #     detected_native_crs = 4326
+                # elif 100000 < median_x < 1300000 and 6000000 < median_y < 7400000:
+                #     detected_native_crs = 2154
+                # elif 0 < median_x < 800000 and 0 < median_y < 1300000:
+                #     detected_native_crs = 27700
+                # elif 0 < median_x < 1000000 and 5400000 < median_y < 7800000:
+                #     detected_native_crs = 25832
+                # elif -1000000 < median_x < 4000000 and 1500000 < median_y < 5500000:
+                #     detected_native_crs = 3035
+                # elif -700000 < median_x < 1100000 and 3900000 < median_y < 4900000:
+                #     detected_native_crs = 2062
+                # elif -2.2e6 < median_x < 2.2e6 and 3.0e6 < median_y < 2.2e7:
+                #     detected_native_crs = 3857
+                # else:
+                #     detected_native_crs = 4326
+
+                import fiona
+                with fiona.open(filepath) as src:
+                    file_crs = src.crs_wkt
+                from pyproj import CRS
+                detected_native_crs = CRS.from_wkt(file_crs).to_epsg() or 4326
+
+
                 last_gdf = gpd.GeoDataFrame(geometry=geometries, crs=f"EPSG:{detected_native_crs}")
                 
+                print(f"[DuckDB] last_gdf CRS: {last_gdf.crs}, bounds: {last_gdf.total_bounds}")
         except Exception as e:
             print(f"[DuckDB] Sample GeoDataFrame creation error: {e}")
-            gdf = gpd.read_file(filepath)
-            if len(gdf) > 1000:
-                gdf = gdf.sample(n=1000, random_state=42)
-            last_gdf = gdf
+            last_gdf = None
 
+
+        # --- DateTime analysis ---
+        datetime_analysis = analyze_datetime_columns(conn, "geo_data", raw_filepath=filepath)
         conn.close()
 
         base_summary = {
@@ -1591,6 +2277,9 @@ def inspect_geospatial_duckdb(filepath, gdf_metro, geo_key_patterns=None, wgs84_
             "Score de complétude des clés géographique": geo_key_completeness
         }
 
+        if datetime_analysis:
+            base_summary["Analyse temporelle"] = datetime_analysis
+            
         granularite = detect_granularite(
             ", ".join(k["col"] for k in geo_keys) if geo_keys else "None",
             geo_summary)
@@ -1611,31 +2300,19 @@ def inspect_geospatial_duckdb(filepath, gdf_metro, geo_key_patterns=None, wgs84_
         traceback.print_exc()
         raise
 
-# ============================================================================
-# SHARED FUNCTIONS (from original)
-# ============================================================================
+
 def guess_crs_from_bounds(gdf):
-    """Guess CRS from bounding box coordinates."""
+    """Guess CRS from GeoDataFrame using score-based detection."""
     if gdf.empty or gdf.geometry.is_empty.all():
         return None
-
     try:
-        geom_type = gdf.geometry.iloc[0].geom_type
-        if geom_type == 'Point':
-            xs, ys = gdf.geometry.x, gdf.geometry.y
+        if gdf.geometry.iloc[0].geom_type == 'Point':
+            xs, ys = gdf.geometry.x.values, gdf.geometry.y.values
         else:
             centroids = gdf.geometry.centroid
-            xs, ys = centroids.x, centroids.y
-
-        median_x, median_y = xs.median(), ys.median()
-
-        if -10 < median_x < 10 and 40 < median_y < 60:
-            return 4326
-        elif 100000 < median_x < 1300000 and 6000000 < median_y < 7400000:
-            return 2154
-        elif -2.2e6 < median_x < 2.2e6 and -2.2e6 < median_y < 2.2e6:
-            return 3857
-        return None
+            xs, ys = centroids.x.values, centroids.y.values
+        epsg, _conf, _alts = guess_crs_from_xy(xs, ys)
+        return epsg
     except Exception:
         return None
 
@@ -1688,7 +2365,7 @@ def process_geodataframe(gdf, gdf_metro, compute_duplicates=True):
             "Taux de remplissage géométrique (%)": remplissage['Taux de remplissage (%)'],
             "Complexité moyenne des géométries": complexite['Complexite moyenne (sommets)'],
             "Part des geometries dupliquees (%)": doublons['Geometries dupliquees (%)'],
-            "Couverture territoriale hexagonale (%)": remplissage['Couverture territoriale (%)'],
+            "Couverture territoriale (%)": remplissage['Couverture territoriale (%)'],
         }
 
         return gdf_proj, geo_metrics
@@ -1709,7 +2386,7 @@ def get_default_geo_summary():
         "Taux de remplissage géométrique (%)": None,
         "Complexité moyenne des géométries": None,
         "Part des geometries dupliquees (%)": None,
-        "Couverture territoriale hexagonale (%)": None,
+        "Couverture territoriale (%)": None,
     }
 
 

@@ -1,24 +1,68 @@
 # Geodata Metadata Extraction Library
 
-A comprehensive Python library for extracting metadata from geospatial and tabular files with automatic geometry detection, CRS transformation, and spatial metrics calculation.
+A comprehensive Python library for extracting metadata from geospatial and tabular files with automatic geometry detection, multi-country CRS handling, and spatial metrics calculation.
 
 ## Features
 
 - **Multi-format Support**: CSV, Excel (.xlsx), GeoJSON, Shapefile, GeoPackage
-- **Automatic Geometry Detection**: Detects lat/lon columns, X/Y coordinates, WKT, GeoJSON geometries
-- **CRS Detection & Transformation**: Automatically detects and transforms coordinate reference systems
-- **Spatial Metrics**: Area, density, coverage, complexity, duplicates, fill rate
+- **Automatic Geometry Detection**: Lat/lon columns, X/Y coordinates, LineString start/end pairs, WKT, GeoJSON geometries
+- **Multi-country Support**: Built-in reference files and geographic key patterns for France, UK, Germany, Italy, Spain, USA, and Europe (NUTS)
+- **CRS Detection**: Automatically detects coordinate reference systems; area and density always computed in km² regardless of source CRS
+- **Bilingual**: French/English with hover tooltips explaining each metric
 - **Batch Processing**: Process multiple files or entire directories
 - **Multiple Export Formats**: Dict, DataFrame, JSON, CSV, Excel
 - **Performance**: DuckDB-powered for fast processing of large files
-- **Error Handling**: Graceful error handling with detailed error messages
 
 ## Installation
 
-The library requires the following dependencies:
-
 ```bash
-pip install pandas geopandas duckdb openpyxl
+pip install -e .
+# or
+pip install -r requirements.txt
+```
+
+## Module Location
+
+The library lives in `geodata_inspector/metadata.py`:
+
+```python
+from geodata_inspector.metadata import MetadataExtractor
+```
+
+## Configuration
+
+The library reads `web_app/config.yaml` to determine the active country, which controls:
+- which reference boundary file to load from `reference_file/`
+- which metric CRS to use for area/density calculations
+- which geographic key patterns to apply for join key detection
+
+```yaml
+# web_app/config.yaml
+language: fr
+localisation:
+  country: france   # france | uk | germany | italy | spain | usa | europe | custom
+```
+
+### Supported Countries
+
+| `country` | Reference file | Metric CRS | Geographic keys detected |
+|---|---|---|---|
+| `france` | `fr_regions.geojson` | EPSG:2154 (Lambert 93) | INSEE commune, postal, département, région, IRIS, EPCI |
+| `uk` | `uk_regions.geojson` | EPSG:27700 (BNG) | Postcode, ONS area code, LSOA, MSOA, Local Authority |
+| `germany` | `germany_states.geojson` | EPSG:25832 (UTM 32N) | PLZ, Gemeindeschlüssel, Kreisschlüssel, Bundesland, NUTS |
+| `italy` | `italy_regions.geojson` | EPSG:25832 (UTM 32N) | CAP, ISTAT comune, provincia, regione, NUTS |
+| `spain` | `spain_regions.geojson` | EPSG:2062 (Madrid 1870) | Código postal, INE municipio, provincia, comunidad, NUTS |
+| `usa` | `usa_states.geojson` | EPSG:4326 (WGS84) | ZIP code, FIPS state/county, Census tract, state abbreviation |
+| `europe` | `europe_geographic.geojson` | EPSG:3035 (ETRS89-LAEA) | NUTS 0–3, LAU code |
+| `custom` | `custom_reference_path` | `custom_metric_crs` | None (fallback heuristics) |
+
+### Custom Reference File
+
+```yaml
+localisation:
+  country: custom
+  custom_reference_path: /path/to/my_reference.geojson
+  custom_metric_crs: 2154
 ```
 
 ## Quick Start
@@ -26,30 +70,33 @@ pip install pandas geopandas duckdb openpyxl
 ### Single File Extraction
 
 ```python
-from geodata_metadata import MetadataExtractor
+from geodata_inspector.metadata import MetadataExtractor
 
-# Initialize extractor
-extractor = MetadataExtractor(reference_file="data/regions.geojson")
+# Country and reference file resolved automatically from web_app/config.yaml
+extractor = MetadataExtractor()
 
-# Extract metadata
 result = extractor.extract("data/your_file.csv")
 
 if result.success:
-    metadata = result.metadata
-    print(f"File: {metadata['Nom du fichier']}")
-    print(f"Rows: {metadata['Nb lignes']}")
-    print(f"Columns: {metadata['Nb colonnes']}")
-    print(f"CRS: {metadata['CRS']}")
+    m = result.metadata
+    print(f"File: {m['Nom du fichier']}")
+    print(f"Rows: {m['Nb lignes']}")
+    print(f"CRS: {m['CRS']}")
+    print(f"Area: {m['Emprise estimée (km2)']} km²")
+    print(f"Density: {m['Densité (obj/km2)']} obj/km²")
+```
+
+### Override Country at Runtime
+
+```python
+extractor = MetadataExtractor(country="uk")
 ```
 
 ### Batch Processing
 
 ```python
-# Process multiple files
-files = ["file1.csv", "file2.geojson", "file3.xlsx"]
-results = extractor.extract_batch(files)
+results = extractor.extract_batch(["file1.csv", "file2.geojson", "file3.xlsx"])
 
-# Export to various formats
 extractor.to_csv(results, "metadata.csv")
 extractor.to_json(results, "metadata.json")
 extractor.to_excel(results, "metadata.xlsx")
@@ -58,174 +105,45 @@ extractor.to_excel(results, "metadata.xlsx")
 ### Directory Processing
 
 ```python
-# Process all supported files in a directory
 results = extractor.extract_from_directory(
     directory="data",
     recursive=True,
     verbose=True
 )
 
-# Get summary statistics
 stats = extractor.get_summary_stats(results)
 print(f"Processed {stats['total_files']} files in {stats['total_time']:.2f}s")
-```
-
-### Convenience Functions
-
-```python
-from geodata_metadata import extract_metadata, extract_metadata_batch
-
-# Quick single file
-metadata = extract_metadata("data/file.csv")
-
-# Quick batch with export
-extract_metadata_batch(
-    ["file1.csv", "file2.geojson"],
-    output_csv="metadata.csv",
-    output_json="metadata.json"
-)
 ```
 
 ## API Reference
 
 ### MetadataExtractor Class
 
-#### `__init__(reference_file=None, supported_extensions=None)`
-
-Initialize the metadata extractor.
+#### `__init__(country=None, reference_file=None, metric_crs=None, supported_extensions=None)`
 
 **Parameters:**
-- `reference_file` (str, optional): Path to reference GeoJSON for coverage calculations
-- `supported_extensions` (set, optional): Set of supported file extensions
+- `country` (str, optional): Override the country from `config.yaml`. One of `france`, `uk`, `germany`, `italy`, `spain`, `usa`, `europe`, `custom`.
+- `reference_file` (str, optional): Explicit path to a reference GeoJSON (overrides country lookup).
+- `metric_crs` (int, optional): Explicit metric CRS EPSG code (overrides country lookup).
+- `supported_extensions` (set, optional): Set of supported file extensions.
 
-**Example:**
-```python
-extractor = MetadataExtractor(reference_file="data/regions.geojson")
-```
+If none of these are provided, the country is read from `web_app/config.yaml` and the reference file and CRS are resolved from the `LOCALISATIONS` registry in `web_app/config.py`.
 
-#### `extract(filepath, include_geodataframe=False)`
+#### `extract(filepath, include_geodataframe=False)` → `MetadataResult`
 
-Extract metadata from a single file.
+#### `extract_batch(filepaths, verbose=True, stop_on_error=False)` → `List[MetadataResult]`
 
-**Parameters:**
-- `filepath` (str): Path to the file to inspect
-- `include_geodataframe` (bool): If True, include the GeoDataFrame in the result
-
-**Returns:**
-- `MetadataResult`: Result object with metadata or error information
-
-**Example:**
-```python
-result = extractor.extract("data/file.csv")
-if result.success:
-    print(result.metadata)
-else:
-    print(result.error)
-```
-
-#### `extract_batch(filepaths, verbose=True, stop_on_error=False)`
-
-Extract metadata from multiple files.
-
-**Parameters:**
-- `filepaths` (List[str]): List of file paths to process
-- `verbose` (bool): If True, print progress information
-- `stop_on_error` (bool): If True, stop processing on first error
-
-**Returns:**
-- `List[MetadataResult]`: List of results for each file
-
-**Example:**
-```python
-results = extractor.extract_batch(
-    ["file1.csv", "file2.geojson"],
-    verbose=True,
-    stop_on_error=False
-)
-```
-
-#### `extract_from_directory(directory, recursive=True, pattern="*", **kwargs)`
-
-Extract metadata from all supported files in a directory.
-
-**Parameters:**
-- `directory` (str): Path to directory
-- `recursive` (bool): If True, search subdirectories
-- `pattern` (str): Glob pattern to match files
-- `**kwargs`: Additional arguments passed to extract_batch
-
-**Returns:**
-- `List[MetadataResult]`: List of results for each file
-
-**Example:**
-```python
-results = extractor.extract_from_directory(
-    directory="data",
-    recursive=True,
-    pattern="*"
-)
-```
+#### `extract_from_directory(directory, recursive=True, pattern="*", **kwargs)` → `List[MetadataResult]`
 
 #### Static Methods
 
-##### `to_dataframe(results, flatten=True, include_errors=True)`
-
-Convert results to pandas DataFrame.
-
-**Example:**
-```python
-df = MetadataExtractor.to_dataframe(results, flatten=True)
-print(df.head())
-```
-
-##### `to_json(results, output_file=None, flatten=False, indent=2)`
-
-Convert results to JSON.
-
-**Example:**
-```python
-# Write to file
-MetadataExtractor.to_json(results, "output.json")
-
-# Get JSON string
-json_str = MetadataExtractor.to_json(results)
-```
-
-##### `to_csv(results, output_file, flatten=True, **kwargs)`
-
-Convert results to CSV.
-
-**Example:**
-```python
-MetadataExtractor.to_csv(results, "output.csv")
-```
-
-##### `to_excel(results, output_file, flatten=True, **kwargs)`
-
-Convert results to Excel.
-
-**Example:**
-```python
-MetadataExtractor.to_excel(results, "output.xlsx")
-```
-
-#### `get_summary_stats(results)`
-
-Get summary statistics from batch results.
-
-**Returns:**
-- `Dict`: Dictionary with statistics
-
-**Example:**
-```python
-stats = extractor.get_summary_stats(results)
-print(f"Success rate: {stats['success_rate']:.1f}%")
-print(f"Total rows: {stats['total_rows']:,}")
-```
+- `to_dataframe(results, flatten=True, include_errors=True)` → DataFrame
+- `to_json(results, output_file=None, flatten=False, indent=2)` → JSON string or file
+- `to_csv(results, output_file, flatten=True, **kwargs)` → CSV file
+- `to_excel(results, output_file, flatten=True, **kwargs)` → Excel file
+- `get_summary_stats(results)` → Dict with `success_rate`, `total_rows`, `total_time`, `successful`, `failed`
 
 ### MetadataResult Class
-
-Container for metadata extraction results.
 
 **Attributes:**
 - `filepath` (str): Path to the processed file
@@ -239,259 +157,181 @@ Container for metadata extraction results.
 
 ## Metadata Structure
 
-Each successful extraction returns a dictionary with the following keys:
-
 ### File Information
-- `Dossier`: Directory path
-- `Nom du fichier`: Filename
-- `Taille (Ko)`: File size in KB
-- `Date de création du fichier (Y-M-D)`: File creation date
-- `Type de fichier`: File type description
+
+| Key | Description |
+|-----|-------------|
+| `Nom du fichier` | Filename |
+| `Taille (Ko)` | File size in KB |
+| `Date de création du fichier (Y-M-D)` | File creation date |
+| `Type de fichier` | File type description |
 
 ### Data Structure
-- `Nb lignes`: Number of rows
-- `Nb colonnes`: Number of columns
-- `Colonnes`: Detailed column information (type, examples, missing values)
+
+| Key | Description |
+|-----|-------------|
+| `Nb lignes` | Number of rows |
+| `Nb colonnes` | Number of columns |
+| `Colonnes` | Nested table: column name, sample value, type, missing values count |
 
 ### Data Quality
-- `Score de complétude global`: Overall completeness score
-  - `Score de complétude moyen`: Mean completeness (0-1)
-  - `Score de complétude std`: Standard deviation
+
+| Key | Structure | Description |
+|-----|-----------|-------------|
+| `Score de complétude global` | `{"_table": True, "data": [{"Score de complétude moyen (%)": float, "Score de complétude std (%)": float}]}` | Mean fill rate and std across all columns |
+| `Score de complétude des clés géographique` | same `_table` structure | Fill rate restricted to detected geographic key columns |
 
 ### Geographic Information
-- `Géotransformation`: Geometry transformation method
-- `Clés géographiques`: Geographic join keys (INSEE codes, etc.)
-- `Score de complétude géographique`: Geographic completeness
-- `CRS`: Coordinate Reference System
-- `Types de géométrie`: Geometry types (Point, Polygon, etc.)
+
+| Key | Description |
+|-----|-------------|
+| `Clés géographiques` | Nested table: reference area type + identified column. Patterns are country-specific (see `web_app/config.py` `LOCALISATIONS`). |
+| `Géotransformation` | Detected geometry method (see values below) |
+
+**`Géotransformation` values:**
+- `Aucune géométrie` — no geometry detected
+- `Présence géométrie` — native geometry column (WKT, GeoJSON, geopoint)
+- `Présence géométrie séparée (x,y)` — separate lat/lon or x/y columns
+- `Présence géométrie multiples (x1,y1), (x2,y2)` — LineString from start/end coordinate pairs
+- `Géocodage de l'adresse` — address column found, geocoding required
+- `Jointure spatiale à l'aide de clés géographiques` — administrative codes for spatial join
 
 ### Spatial Metrics
-- `Emprise estimée (km2)`: Estimated area in km²
-- `Densité (obj/km2)`: Object density per km²
-- `Taux de remplissage (%)`: Fill rate percentage
-- `Complexite moyenne`: Average geometry complexity
-- `Geometries dupliquees (%)`: Duplicate geometries percentage
-- `Couverture territoriale hexagonale (%)`: Territorial coverage percentage
 
-### Processing Information
-- `Temps de traitement (s)`: Processing time in seconds
+All area-based metrics are computed in km² regardless of source CRS. Non-metric CRS (e.g. WGS84/EPSG:4326) are reprojected to the country's configured metric CRS for area calculations only — stored geometries are never modified.
+
+| Key | Structure | Description |
+|-----|-----------|-------------|
+| `Score de complétude géographique` | `{"_table": True, "data": [{"Présentes (%)": float, "Valides (%)": float}]}` | Share of geometries present and topologically valid |
+| `CRS` | string | Detected source CRS, e.g. `EPSG:4326` |
+| `Types de géométrie` | string | Point, LineString, Polygon, etc. |
+| `Emprise estimée (km2)` | float | Area of the bounding envelope in km² |
+| `Densité (obj/km2)` | float | Objects per km² within estimated extent |
+| `Taux de remplissage géométrique (%)` | float | Ratio of geometry area to bounding box area |
+| `Complexité moyenne des géométries` | float or string | Average vertex count; `"None : POINT"` for point layers |
+| `Part des geometries dupliquees (%)` | float | % of geometries with identical coordinates |
+| `Couverture territoriale (%)` | float | Share of the configured reference territory covered |
+| `Granularité` | string | Inferred spatial granularity (country-specific codes or geometry type) |
 
 ## Examples
 
 ### Example 1: Basic Usage
 
 ```python
-from geodata_metadata import MetadataExtractor
+from geodata_inspector.metadata import MetadataExtractor
 
-# Initialize
-extractor = MetadataExtractor(reference_file="data/regions.geojson")
-
-# Extract metadata
+extractor = MetadataExtractor()
 result = extractor.extract("data/pesticides.csv")
 
 if result.success:
     m = result.metadata
-    print(f"File: {m['Nom du fichier']}")
     print(f"Rows: {m['Nb lignes']:,}")
-    print(f"Columns: {m['Nb colonnes']}")
     print(f"Geometry: {m['Géotransformation']}")
     print(f"Area: {m['Emprise estimée (km2)']} km²")
+
+    c = m['Score de complétude global']['data'][0]
+    print(f"Mean completeness: {c['Score de complétude moyen (%)']}%")
 ```
 
-### Example 2: Batch Processing with Analysis
+### Example 2: Multi-country Batch
 
 ```python
-from geodata_metadata import MetadataExtractor
+from geodata_inspector.metadata import MetadataExtractor
 
-extractor = MetadataExtractor(reference_file="data/regions.geojson")
+fr_extractor = MetadataExtractor(country="france")
+fr_results = fr_extractor.extract_from_directory("data/france")
 
-# Process directory
-results = extractor.extract_from_directory("data", recursive=True)
+uk_extractor = MetadataExtractor(country="uk")
+uk_results = uk_extractor.extract_from_directory("data/uk")
 
-# Convert to DataFrame for analysis
-df = extractor.to_dataframe(results, flatten=True)
-
-# Filter files with geometry
-geo_files = df[df['Géotransformation'] != 'Aucune géométrie']
-print(f"Files with geometry: {len(geo_files)}")
-
-# Find largest files
-largest = df.nlargest(5, 'Taille (Ko)')
-print("\nLargest files:")
-print(largest[['Nom du fichier', 'Taille (Ko)', 'Nb lignes']])
-
-# Export results
-extractor.to_csv(results, "metadata_report.csv")
+fr_extractor.to_csv(fr_results, "france_metadata.csv")
+uk_extractor.to_csv(uk_results, "uk_metadata.csv")
 ```
 
-### Example 3: Error Handling
+### Example 3: Accessing Nested Metrics
 
 ```python
-from geodata_metadata import MetadataExtractor
+result = extractor.extract("data/file.csv")
+if result.success:
+    m = result.metadata
 
-extractor = MetadataExtractor()
+    geo = m['Score de complétude géographique']['data'][0]
+    print(f"Present: {geo['Présentes (%)']}%, Valid: {geo['Valides (%)']}%")
 
-files = ["file1.csv", "nonexistent.csv", "file2.geojson"]
-results = extractor.extract_batch(files, stop_on_error=False)
+    keys = m['Score de complétude des clés géographique']['data'][0]
+    print(f"Key fill rate: {keys['Score de complétude moyen (%)']}%")
 
-# Separate successful and failed
-successful = [r for r in results if r.success]
-failed = [r for r in results if not r.success]
-
-print(f"Successful: {len(successful)}")
-print(f"Failed: {len(failed)}")
-
-for result in failed:
-    print(f"  {result.filepath}: {result.error}")
+    if isinstance(m['Clés géographiques'], dict):
+        for row in m['Clés géographiques']['data']:
+            print(f"  {row['Reference area']} → {row['Identified key']}")
 ```
 
-### Example 4: Custom Analysis
+### Example 4: Error Handling
 
 ```python
-from geodata_metadata import MetadataExtractor
-import pandas as pd
+results = extractor.extract_batch(
+    ["file1.csv", "nonexistent.csv", "file2.geojson"],
+    stop_on_error=False
+)
 
-extractor = MetadataExtractor(reference_file="data/regions.geojson")
-results = extractor.extract_from_directory("data")
-
-# Convert to DataFrame
-df = extractor.to_dataframe(results, flatten=True)
-
-# Calculate statistics
-total_rows = df['Nb lignes'].sum()
-avg_completeness = df['Score de complétude global - Score de complétude moyen'].mean()
-
-print(f"Total rows: {total_rows:,}")
-print(f"Average completeness: {avg_completeness:.2%}")
-
-# Group by file type
-print("\nFiles by type:")
-print(df.groupby('Type de fichier')['Nb lignes'].agg(['count', 'sum']))
+for r in results:
+    if r.success:
+        print(f"✓ {r.filepath}: {r.metadata['Nb lignes']} rows")
+    else:
+        print(f"✗ {r.filepath}: {r.error}")
 ```
+
+## Metrics Glossary
+
+| Metric | Definition |
+|--------|------------|
+| `Score de complétude global` | Mean fill rate and std computed across all columns |
+| `Clés géographiques` | Columns identified as joinable geographic references — patterns are country-specific |
+| `Géotransformation` | Type of geographic representation detected in the file |
+| `CRS` | Coordinate Reference System detected from coordinate values |
+| `Types de géométrie` | Geometry type(s): Point, LineString, Polygon, etc. |
+| `Emprise estimée (km2)` | Bounding envelope area in km² — always metric regardless of source CRS |
+| `Densité (obj/km2)` | Objects per km² within the estimated extent |
+| `Taux de remplissage géométrique (%)` | Ratio of geometry area to bounding box area |
+| `Complexité moyenne des géométries` | Average vertex count; "None : POINT" for point layers |
+| `Part des geometries dupliquees (%)` | % of geometries with coordinates identical to another row |
+| `Couverture territoriale (%)` | Share of the configured reference territory covered by the data extent |
+| `Score de complétude géographique` | Share of geometries that are present and topologically valid |
+| `Score de complétude des clés géographique` | Fill rate of columns identified as geographic join keys |
 
 ## Supported File Formats
 
 | Format | Extensions | Notes |
 |--------|-----------|-------|
 | CSV | `.csv`, `.txt` | Auto-detects delimiter and encoding |
-| Excel | `.xlsx` | Smart sampling for large files |
+| Excel | `.xlsx` | Smart sampling for large files (Calamine engine) |
 | GeoJSON | `.geojson`, `.json` | Native geometry support |
-| Shapefile | `.shp` | Requires .shx, .dbf, .prj files |
+| Shapefile | `.shp` | Requires `.shx`, `.dbf`, `.prj` sidecar files |
 | GeoPackage | `.gpkg` | SQLite-based format |
 
-## Geometry Detection Methods
+## CRS Handling
 
-The library automatically detects various geometry formats:
-
-1. **Lat/Lon columns**: Columns named latitude/longitude, lat/lon, etc.
-2. **X/Y coordinates**: Columns named X/Y (Lambert, Web Mercator)
-3. **LineString coordinates**: Start/end coordinate pairs (xD, yD, xF, yF)
-4. **WKT format**: Well-Known Text geometry strings
-5. **GeoJSON objects**: GeoJSON geometry objects
-6. **Geo_point format**: Comma-separated coordinates
-7. **Address columns**: Columns containing addresses (requires geocoding)
-8. **INSEE codes**: French administrative codes for spatial joins
-
-## Performance
-
-The library uses DuckDB for high-performance processing:
-
-- **CSV files**: 10-100x faster than pandas for large files
-- **SQL-based aggregations**: Efficient column statistics and metrics
-- **Spatial operations**: DuckDB spatial extension for geometry processing
-- **Smart sampling**: Intelligent sampling for very large Excel files
-
-## Replacing batch_inspect_duckdb.py
-
-The library can directly replace your batch script:
-
-```python
-from geodata_metadata import MetadataExtractor
-
-# Original batch script equivalent
-DATA_FOLDER = "data-20260203T152655Z-3-001"
-
-extractor = MetadataExtractor(reference_file="data/regions.geojson")
-results = extractor.extract_from_directory(DATA_FOLDER, recursive=True)
-
-# Export results
-extractor.to_csv(results, "inspection_summary_duckdb.csv")
-extractor.to_excel(results, "inspection_summary_duckdb.xlsx")
-
-# Print summary
-stats = extractor.get_summary_stats(results)
-print(f"Processed: {stats['successful']} files")
-print(f"Errors: {stats['failed']}")
-print(f"Total time: {stats['total_time']:.1f}s")
-```
-
-## Advanced Usage
-
-### Custom Supported Extensions
-
-```python
-# Add support for custom extensions
-extractor = MetadataExtractor(
-    reference_file="data/regions.geojson",
-    supported_extensions={'.csv', '.xlsx', '.geojson', '.parquet'}
-)
-```
-
-### Pattern Matching
-
-```python
-# Process only CSV files
-results = extractor.extract_from_directory(
-    directory="data",
-    pattern="*.csv"
-)
-```
-
-### Include GeoDataFrame
-
-```python
-# Include GeoDataFrame for visualization
-result = extractor.extract("data/file.geojson", include_geodataframe=True)
-
-if result.success and "_geodataframe" in result.metadata:
-    gdf = result.metadata["_geodataframe"]
-    gdf.plot()
-```
+CRS is detected from median coordinate values. For area/density, non-metric CRS are reprojected to the country's configured metric CRS. Stored geometries are never modified.
 
 ## Troubleshooting
 
-### Missing Dependencies
-
-If you get import errors, install required packages:
+### DuckDB Spatial Extension
 
 ```bash
-pip install pandas geopandas duckdb openpyxl calamine
+python -c "import duckdb; c=duckdb.connect(); c.execute('INSTALL spatial; LOAD spatial;')"
 ```
 
-### Large Files
+### Reference File Not Found
 
-For very large files (>1GB), the library automatically uses:
-- DuckDB streaming for CSV files
-- Smart sampling for Excel files
-- Spatial indexing for geometry operations
+If the reference file for the configured country is missing from `reference_file/`, coverage metrics are disabled but all other metrics still compute.
 
 ### CRS Detection Issues
 
-If CRS detection fails, the library defaults to Lambert 93 (EPSG:2154) for French data. You can manually set CRS in the underlying GeoDataFrame if needed.
-
-## License
-
-This library is based on the DuckDB-optimized geodata inspector.
-
-## Contributing
-
-Contributions are welcome! Please ensure:
-- Code follows existing style
-- New features include examples
-- Error handling is comprehensive
+If detection returns `None`, area calculations fall back to EPSG:3857. For French data, Lambert 93 coordinates are detected automatically as EPSG:2154.
 
 ## See Also
 
-- `example_usage.py`: Comprehensive examples
-- `inspect_geodata_duckdb.py`: Underlying inspection module
-- `batch_inspect_duckdb.py`: Original batch processing script
+- `LIBRARY_SUMMARY.md`: Quick start guide
+- `examples/example_usage.py`: Comprehensive usage examples
+- `README.md`: Web application documentation
+- `web_app/config.py`: Full `LOCALISATIONS` registry with all country definitions

@@ -340,7 +340,7 @@ class MetadataExtractor:
                 "Type de fichier", "Taille (Ko)", "Nb lignes", "Nb colonnes",
                 "Temps de traitement (s)", "Géotransformation", "CRS",
                 "Types de géométrie", "Emprise estimée (km2)",
-                "Couverture territoriale hexagonale (%)"
+                "Couverture territoriale (%)"
             ]
 
             # Put priority columns first, then the rest
@@ -550,7 +550,7 @@ Geodata Metadata Extraction Library
     if len(sys.argv) > 1:
         # Quick test with provided file
         filepath = sys.argv[1]
-        reference = "data/regions.geojson" if os.path.exists("data/regions.geojson") else None
+        reference = "data/regions.geojson" if os.path.exists("data/fr_regions.geojson") else None
         print(f"\nTesting with: {filepath}\n")
         
         extractor = MetadataExtractor(reference_file=reference)
