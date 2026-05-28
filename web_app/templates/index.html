@@ -433,6 +433,24 @@
                 <p id="mapNote" style="display:none; margin-top:0.5rem; font-size:0.8rem; color:#90a4ae; text-align:left;">
                     {{ UI.map_note }}
                 </p>
+                <div id="crsOverridePanel" style="display:none; margin-top:0.75rem; padding:0.75rem 1rem; background:#f0f4f8; border-radius:6px; border:1px solid #ccd6e0;">
+                    <div style="font-size:0.8rem; color:#546e7a; margin-bottom:0.5rem;">
+                        ⚠️ Map looks wrong? Override the CRS:
+                    </div>
+                    <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+                        <span style="font-size:0.85rem; color:#37474f;">EPSG:</span>
+                        <input id="crsInput" type="number" placeholder="e.g. 27700"
+                               style="width:110px; padding:0.3rem 0.5rem; border:1px solid #b0bec5; border-radius:4px; font-size:0.85rem;"/>
+                        <button id="applyRemapBtn" onclick="applyRemap()"
+                                style="padding:0.3rem 0.8rem; background:#2d6a9f; color:white; border:none; border-radius:4px; font-size:0.85rem; cursor:pointer;">
+                            Apply
+                        </button>
+                        <span id="remapStatus" style="font-size:0.8rem; color:#e53935;"></span>
+                    </div>
+                    <div style="margin-top:0.4rem; font-size:0.75rem; color:#78909c;">
+                        Common codes: 4326 (WGS84) · 2154 (France) · 27700 (UK) · 25832 (Germany/Italy UTM) · 3035 (Europe) · 2062 (Spain)
+                    </div>
+                </div>
             </div>
         </div>
         <!-- DateTime analysis section -->
@@ -954,7 +972,44 @@
                 alert(`Erreur : ${e.message}`);
             }
         }
+        async function applyRemap() {
+            const epsg = parseInt(document.getElementById('crsInput').value);
+            const statusEl = document.getElementById('remapStatus');
+            const btn = document.getElementById('applyRemapBtn');
 
+            if (!epsg || epsg <= 0) {
+                statusEl.style.color = '#e53935';
+                statusEl.textContent = 'Please enter a valid EPSG code.';
+                return;
+            }
+
+            btn.disabled = true;
+            statusEl.style.color = '#546e7a';
+            statusEl.textContent = 'Reprojecting...';
+
+            try {
+                const resp = await fetch('/remap', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ epsg })
+                });
+                const data = await resp.json();
+
+                if (!resp.ok || data.error) {
+                    statusEl.style.color = '#e53935';
+                    statusEl.textContent = data.error || 'Error reprojecting.';
+                } else {
+                    statusEl.style.color = '#2e7d32';
+                    statusEl.textContent = `✓ Reprojected as EPSG:${epsg}`;
+                    displayMap(data);
+                }
+            } catch (e) {
+                statusEl.style.color = '#e53935';
+                statusEl.textContent = `Connection error: ${e.message}`;
+            } finally {
+                btn.disabled = false;
+            }
+        }
         // ── Map ───────────────────────────────────────────────────────────
         function displayMap(mapData) {
             if (map) { map.remove(); }
@@ -980,6 +1035,8 @@
                 map.invalidateSize();
                 if (mapData.bounds) { map.fitBounds(mapData.bounds, { padding: [20, 20] }); }
             }, 100);
+            document.getElementById('crsOverridePanel').style.display = 'block';
+            document.getElementById('remapStatus').textContent = '';
         }
 
 // ── Batch processing ──────────────────────────────────────────────
@@ -1051,6 +1108,9 @@
             fileInput.value = '';
             clearBtn.style.display = 'none';
             document.getElementById('mapNote').style.display = 'none';
+            document.getElementById('crsOverridePanel').style.display = 'none';
+            document.getElementById('crsInput').value = '';
+            document.getElementById('remapStatus').textContent = '';
             previewSection.style.display = 'none';
             previewTableWrap.innerHTML = '';
             document.getElementById('resultDownloadBtn').style.display = 'none';

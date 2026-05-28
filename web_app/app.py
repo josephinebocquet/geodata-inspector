@@ -278,6 +278,7 @@ def upload():
 
     try:
         saved_path = os.path.join(tmpdir, file.filename)
+        print(saved_path)
         file.save(saved_path)
         # Save any sidecar files (e.g. .shx, .dbf, .prj for shapefiles)
         for sidecar in request.files.getlist('sidecars'):
@@ -992,6 +993,44 @@ def batch_stop():
     """Request the running batch to stop after the current file."""
     batch_state["stop_requested"] = True
     return jsonify({"ok": True})
+
+@app.route("/remap", methods=["POST"])
+def remap():
+    try:
+        epsg = int(request.json.get("epsg", 0))
+        if epsg <= 0:
+            return jsonify({"error": "Invalid EPSG code"}), 400
+
+        gdf = inspector.last_gdf
+        if gdf is None or gdf.empty:
+            return jsonify({"error": "No geodata loaded"}), 400
+
+        gdf_override = gdf.set_crs(epsg=epsg, allow_override=True).to_crs(epsg=4326)
+
+        bounds = gdf_override.total_bounds
+        if not all(np.isfinite(bounds)):
+            return jsonify({"error": f"EPSG:{epsg} produced invalid bounds — check the CRS code"}), 400
+
+        center = [(bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2]
+
+        for col in gdf_override.columns:
+            if col != "geometry" and pd.api.types.is_datetime64_any_dtype(gdf_override[col]):
+                gdf_override[col] = gdf_override[col].astype(str)
+
+        geojson = json.loads(gdf_override.to_json())
+
+        return jsonify({
+            "center": center,
+            "bounds": [[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
+            "geojson": geojson,
+            "epsg": epsg,
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     _server = _cfg.get("server", {})
     _host   = _server.get("host", "localhost")
