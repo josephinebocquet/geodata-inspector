@@ -1,0 +1,38 @@
+name: geodata_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Python version
+  - python>=3.10
+
+  # Core data processing
+  - pandas>=2.0.0
+  - numpy>=1.24.0
+  - python-dateutil>=2.8.0
+
+  # Geospatial libraries (conda-forge recommended)
+  - geopandas>=0.14.0
+  - shapely>=2.0.0
+  - pyproj>=3.6.0
+  - fiona>=1.9.0
+  - rtree>=1.0.0
+
+  # File format support
+  - openpyxl>=3.1.0
+  - chardet>=5.0.0
+  - pyyaml>=6.0
+
+  # Web application
+  - flask>=3.0.0
+
+  # Spatial analysis
+  - libpysal>=4.9.0
+  - esda>=2.5.0
+
+  # Pip dependencies (not available or better via pip)
+  - pip
+  - pip:
+    - duckdb>=0.9.0
+    - python-calamine>=0.1.0
+    - clevercsv>=0.8.0

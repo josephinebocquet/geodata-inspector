@@ -627,7 +627,7 @@
                     addLog(UI.log_lines.replace('{rows}', nbLignes).replace('{cols}', nbColonnes));
 
                     displayResults(data.summary);
-                    displayDatetime(data.datetime);  
+                    displayDatetime(data.datetime);
                     
                     if (data.glossary_translated) currentGlossary = data.glossary_translated;
                     injectGlossaryIcons(currentGlossary);
@@ -701,7 +701,7 @@
         function renderDatetimeAnalysis(dt) {
             if (!dt) return '<em>N/A</em>';
             let html = '';
-        
+
             if (dt.interval_pairs && dt.interval_pairs.length > 0) {
                 dt.interval_pairs.forEach(pair => {
                     const isOccupancy = pair.chart_type === 'occupancy';
@@ -748,7 +748,7 @@
         }
         
         function renderOccupancyChart(buckets, barClass, yLabel = '', unit = '') {
-            if (!buckets || buckets.length === 0) return '<em>No data</em>';
+            if (!buckets || buckets.length === 0) return '';  // Return empty string instead of "No data"
         
             const W = 560, H = 110, PAD_L = 36, PAD_R = 8, PAD_T = 6, PAD_B = 42;
             const chartW = W - PAD_L - PAD_R;
@@ -843,7 +843,8 @@
                 section.style.display = 'none';
                 return;
             }
-            content.innerHTML = renderDatetimeAnalysis(dt);
+            const html = renderDatetimeAnalysis(dt);
+            content.innerHTML = html;
             section.style.display = 'block';
         }
         // ── Glossary tooltips ─────────────────────────────────────────────
