@@ -17,6 +17,7 @@ openpyxl>=3.1.0        # Excel .xlsx files
 python-calamine>=0.1.0  # Fast Excel reading
 chardet>=5.0.0         # Character encoding detection
 clevercsv>=0.8.0       # Smart CSV dialect detection
+pyarrow>=14.0.0        # GeoParquet export
 
 # Web application
 flask>=3.0.0

@@ -107,6 +107,31 @@ COLUMN_ORDER = [
 ]
 
 
+def _clean_download_stem(name):
+    """
+    Return a clean ASCII-only stem safe for Content-Disposition filenames.
+
+    Steps:
+    1. Translate subscript/superscript digits to their ASCII equivalents
+       (e.g. PM₁₀ → PM10).
+    2. NFD-decompose and strip combining diacritics (è → e, à → a, etc.).
+    3. Drop any remaining non-ASCII characters.
+    4. Collapse runs of whitespace.
+    """
+    import unicodedata as _ud
+    import re as _re
+
+    SUB = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
+    SUP = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
+    name = name.translate(SUB).translate(SUP)
+
+    nfd = _ud.normalize("NFD", name)
+    name = "".join(c for c in nfd if not _ud.combining(c))
+    name = name.encode("ascii", errors="ignore").decode("ascii")
+    name = _re.sub(r"\s+", " ", name).strip()
+    return name or "export"
+
+
 def _sanitize_shp_columns(gdf):
     """
     Rename GeoDataFrame columns to DBF-safe names before shapefile export.
@@ -329,11 +354,16 @@ def upload():
             sidecar_path = os.path.join(tmpdir, sidecar.filename)
             sidecar.save(sidecar_path)
             
-        ##Save preview 
-        preview_copy = os.path.join(PREVIEW_DIR, file.filename)
+        # Save preview for later export (use secure name on disk; keep original for download)
+        from werkzeug.utils import secure_filename as _secure
+        _safe_name   = _secure(file.filename) or f"upload{ext}"
+        preview_copy = os.path.join(PREVIEW_DIR, _safe_name)
         shutil.copy2(saved_path, preview_copy)
-        last_preview_path["path"] = preview_copy
-        last_preview_path["ext"] = ext
+        # Strip extension for use as download basename (original name, readable)
+        _orig_stem = os.path.splitext(file.filename)[0]
+        last_preview_path["path"]          = preview_copy
+        last_preview_path["ext"]           = ext
+        last_preview_path["original_stem"] = _orig_stem
         
         # If zip, extract and find the data file inside
         filepath_to_inspect = saved_path
@@ -962,9 +992,9 @@ def export():
     if not path or not os.path.exists(path):
         return jsonify({"error": "No file available for export."}), 404
 
-    SUPPORTED_FORMATS = {"geojson", "gpkg", "shp", "csv"}
+    SUPPORTED_FORMATS = {"geojson", "gpkg", "shp", "geoparquet", "csv"}
     if fmt not in SUPPORTED_FORMATS:
-        return jsonify({"error": f"Unsupported format '{fmt}'. Choose from: {', '.join(SUPPORTED_FORMATS)}"}), 400
+        return jsonify({"error": f"Unsupported format '{fmt}'. Choose from: {', '.join(sorted(SUPPORTED_FORMATS))}"}), 400
 
     try:
         # ── Re-read the FULL file ──────────────────────────────────────────
@@ -1042,23 +1072,30 @@ def export():
         if gdf.crs is None:
             gdf = gdf.set_crs(epsg=4326)
 
-        # Reproject to EPSG:2154 for storage formats, WGS84 for GeoJSON/CSV
-        base_name = os.path.splitext(os.path.basename(path))[0]
+        # Use the original upload filename stem for download names (human-readable).
+        # Use an ASCII-safe slug for internal temp-file paths (avoids FS issues).
+        import re as _re
+        orig_stem  = last_preview_path.get("original_stem") or \
+                     os.path.splitext(os.path.basename(path))[0]
+        # clean_stem: ASCII-only, readable (diacritics stripped, subscripts normalised)
+        clean_stem = _clean_download_stem(orig_stem)
+        # safe_slug: filesystem-safe version for internal temp-file names
+        safe_slug  = _re.sub(r"[^\w]", "_", clean_stem).strip("_") or "export"
 
         if fmt == "geojson":
-            export_path = os.path.join(PREVIEW_DIR, f"{base_name}_export.geojson")
+            export_path   = os.path.join(PREVIEW_DIR, f"{safe_slug}_export.geojson")
             gdf.to_crs(epsg=4326).to_file(export_path, driver="GeoJSON")
-            mime = "application/geo+json"
-            download_name = f"{base_name}.geojson"
+            mime          = "application/geo+json"
+            download_name = f"{clean_stem}.geojson"
 
         elif fmt == "gpkg":
-            export_path = os.path.join(PREVIEW_DIR, f"{base_name}_export.gpkg")
-            gdf.to_crs(epsg=2154).to_file(export_path, driver="GPKG", layer=base_name)
-            mime = "application/geopackage+sqlite3"
-            download_name = f"{base_name}.gpkg"
+            export_path   = os.path.join(PREVIEW_DIR, f"{safe_slug}_export.gpkg")
+            gdf.to_crs(epsg=2154).to_file(export_path, driver="GPKG", layer=safe_slug[:50])
+            mime          = "application/geopackage+sqlite3"
+            download_name = f"{clean_stem}.gpkg"
 
         elif fmt == "shp":
-            shp_path  = os.path.join(PREVIEW_DIR, f"{base_name}_export.shp")
+            shp_path  = os.path.join(PREVIEW_DIR, f"{safe_slug}_export.shp")
             shp_base  = os.path.splitext(shp_path)[0]
 
             gdf_proj = gdf.to_crs(epsg=2154).copy()
@@ -1096,27 +1133,34 @@ def export():
                 for orig, safe in col_mapping.items():
                     writer.writerow([orig, safe])
 
-            zip_path = os.path.join(PREVIEW_DIR, f"{base_name}_shp.zip")
+            zip_path = os.path.join(PREVIEW_DIR, f"{safe_slug}_shp.zip")
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for suffix in [".shp", ".shx", ".dbf", ".prj", ".cpg"]:
                     fp = shp_base + suffix
                     if os.path.exists(fp):
                         zf.write(fp, os.path.basename(fp))
-                zf.write(mapping_path, f"{base_name}_field_names.csv")
+                zf.write(mapping_path, f"{safe_slug}_field_names.csv")
 
-            export_path  = zip_path
-            mime         = "application/zip"
-            download_name = f"{base_name}_shp.zip"
+            export_path   = zip_path
+            mime          = "application/zip"
+            download_name = f"{clean_stem}_shp.zip"
+
+        elif fmt == "geoparquet":
+            export_path   = os.path.join(PREVIEW_DIR, f"{safe_slug}_export.parquet")
+            # GeoParquet preserves full column names, UTF-8, and all dtypes natively
+            gdf.to_crs(epsg=4326).to_parquet(export_path, index=False)
+            mime          = "application/vnd.apache.parquet"
+            download_name = f"{clean_stem}.parquet"
 
         elif fmt == "csv":
-            export_path = os.path.join(PREVIEW_DIR, f"{base_name}_export_geo.csv")
+            export_path   = os.path.join(PREVIEW_DIR, f"{safe_slug}_export_geo.csv")
             gdf_out = gdf.to_crs(epsg=4326).copy()
             gdf_out["geometry_wkt"] = gdf_out.geometry.apply(
                 lambda g: g.wkt if g else None)
             pd.DataFrame(gdf_out.drop(columns="geometry")).to_csv(
                 export_path, index=False, encoding="utf-8-sig")
-            mime = "text/csv"
-            download_name = f"{base_name}_geo.csv"
+            mime          = "text/csv"
+            download_name = f"{clean_stem}_geo.csv"
 
         from flask import send_file
         return send_file(export_path, mimetype=mime,as_attachment=True, download_name=download_name)

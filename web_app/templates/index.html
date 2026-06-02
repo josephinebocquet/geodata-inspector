@@ -236,10 +236,11 @@
             cursor: pointer; font-size: 0.85rem; color: #fff; font-weight: 500;
         }
         .export-btn:hover { opacity: 0.85; }
-        .export-btn.geojson { background: #2e7d32; }
-        .export-btn.gpkg    { background: #1565c0; }
-        .export-btn.shp     { background: #6a1b9a; }
-        .export-btn.csv     { background: #e65100; }
+        .export-btn.geojson    { background: #2e7d32; }
+        .export-btn.gpkg       { background: #1565c0; }
+        .export-btn.shp        { background: #6a1b9a; }
+        .export-btn.geoparquet { background: #00838f; }
+        .export-btn.csv        { background: #e65100; }
         
         /* Metric info tooltip */
         .metric-info {
@@ -456,10 +457,11 @@
                 <div class="export-section" id="exportSection">
                     <p class="export-label">{{ UI.export_label }}</p>
                     <div class="export-btns">
-                        <button class="export-btn geojson" onclick="exportData('geojson')">GeoJSON</button>
-                        <button class="export-btn gpkg"    onclick="exportData('gpkg')">GeoPackage</button>
-                        <button class="export-btn shp"     onclick="exportData('shp')">Shapefile (.zip)</button>
-                        <button class="export-btn csv"     onclick="exportData('csv')">CSV + WKT</button>
+                        <button class="export-btn geojson"    onclick="exportData('geojson')">GeoJSON</button>
+                        <button class="export-btn gpkg"       onclick="exportData('gpkg')">GeoPackage</button>
+                        <button class="export-btn shp"        onclick="exportData('shp')">Shapefile (.zip)</button>
+                        <button class="export-btn geoparquet" onclick="exportData('geoparquet')">GeoParquet</button>
+                        <button class="export-btn csv"        onclick="exportData('csv')">CSV + WKT</button>
                     </div>
                     <div id="exportStatus" style="font-size:0.85rem; margin-top:0.5rem; color:#607d8b;"></div>
                 </div>

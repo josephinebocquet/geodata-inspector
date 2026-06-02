@@ -32,6 +32,8 @@ dependencies:
 
   # Pip dependencies (not available or better via pip)
   - pip
+  - pyarrow>=14.0.0
+
   - pip:
     - duckdb>=0.9.0
     - python-calamine>=0.1.0
