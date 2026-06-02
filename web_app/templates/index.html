@@ -294,6 +294,47 @@
             font-size: 0.75rem; color: #607d8b;
             margin-top: 0.6rem; font-style: italic;
         }
+        /* ── Temporal filter panel ─────────────────────────────────────────── */
+        .dt-filter-panel {
+            background: #f0f4f8; border: 1px solid #cfd8dc;
+            border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1.2rem;
+        }
+        .dt-filter-row {
+            display: flex; align-items: center; flex-wrap: wrap;
+            gap: 0.6rem; margin-bottom: 0.45rem;
+        }
+        .dt-filter-row:last-child { margin-bottom: 0; }
+        .dt-filter-label {
+            font-size: 0.78rem; font-weight: 600; color: #455a64; min-width: 130px;
+        }
+        .dt-gran-btn {
+            padding: 0.2rem 0.55rem; border: 1px solid #b0bec5; border-radius: 4px;
+            background: white; font-size: 0.78rem; cursor: pointer; color: #37474f;
+        }
+        .dt-gran-btn.active { background: #1976d2; color: white; border-color: #1565c0; }
+        .dt-apply-btn {
+            padding: 0.25rem 0.85rem; background: #1976d2; color: white;
+            border: none; border-radius: 4px; font-size: 0.8rem; cursor: pointer;
+        }
+        .dt-apply-btn:hover { background: #1565c0; }
+        .dt-reset-btn {
+            padding: 0.25rem 0.75rem; background: white; color: #546e7a;
+            border: 1px solid #b0bec5; border-radius: 4px; font-size: 0.8rem; cursor: pointer;
+        }
+        .dt-date-input {
+            padding: 0.2rem 0.4rem; border: 1px solid #b0bec5;
+            border-radius: 4px; font-size: 0.8rem; width: 132px;
+        }
+        .dt-bar-clickable, .dt-occ-clickable { cursor: pointer; }
+        .dt-bar-clickable:hover { opacity: 1; stroke: #0d47a1; stroke-width: 1px; }
+        .dt-occ-clickable:hover { opacity: 1; stroke: #004d40; stroke-width: 1px; }
+        .dt-value-bar { fill: #7b1fa2; opacity: 0.85; }
+        .dt-value-bar.dt-bar-clickable:hover { opacity: 1; stroke: #4a148c; stroke-width: 1px; }
+        .dt-select {
+            padding: 0.2rem 0.4rem; border: 1px solid #b0bec5; border-radius: 4px;
+            font-size: 0.8rem; background: white; color: #37474f; cursor: pointer;
+            max-width: 260px;
+        }
         /* Responsive */
         @media (max-width: 900px) {
             .upload-combined { flex-direction: column; }
@@ -456,7 +497,62 @@
         <!-- DateTime analysis section -->
         <div id="datetimeSection" style="display:none; margin-top:1.5rem;">
             <h2 style="color:#1a1a2e; margin-bottom:1rem;">{{ UI.dt_section_title }}</h2>
-            <div id="datetimeContent"></div>
+
+            <!-- ── Shared date range + granularity ──────────────────────── -->
+            <div class="dt-filter-panel" style="margin-bottom:1rem;">
+                <div class="dt-filter-row">
+                    <span class="dt-filter-label">{{ UI.dt_from_label }}</span>
+                    <input type="date" id="dtFromDate" class="dt-date-input" />
+                    <span style="font-size:0.78rem; font-weight:600; color:#455a64;">{{ UI.dt_to_label }}</span>
+                    <input type="date" id="dtToDate" class="dt-date-input" />
+                    <span class="dt-filter-label" style="min-width:auto; margin-left:0.8rem;">{{ UI.dt_gran_label }}</span>
+                    <button class="dt-gran-btn active" data-gran="auto"  onclick="setGranularity('auto',  this)">{{ UI.dt_gran_auto  }}</button>
+                    <button class="dt-gran-btn"        data-gran="year"  onclick="setGranularity('year',  this)">{{ UI.dt_gran_year  }}</button>
+                    <button class="dt-gran-btn"        data-gran="month" onclick="setGranularity('month', this)">{{ UI.dt_gran_month }}</button>
+                    <button class="dt-gran-btn"        data-gran="day"   onclick="setGranularity('day',   this)">{{ UI.dt_gran_day   }}</button>
+                </div>
+                <div style="font-size:0.72rem; color:#90a4ae; margin-top:0.25rem;">{{ UI.dt_click_hint }}</div>
+            </div>
+
+            <!-- ── Panel 1 : Occupancy ───────────────────────────────────── -->
+            <div class="dt-filter-panel" style="margin-bottom:0.8rem;">
+                <div style="font-size:0.8rem; font-weight:700; color:#1a1a2e; margin-bottom:0.5rem; text-transform:uppercase; letter-spacing:0.04em;">
+                    {{ UI.dt_occupancy_section }}
+                </div>
+                <div class="dt-filter-row">
+                    <span class="dt-filter-label">{{ UI.dt_date_col_label }}</span>
+                    <select id="dtOccDateSel" class="dt-select"></select>
+                    <span class="dt-filter-label" style="min-width:auto; margin-left:0.8rem;">{{ UI.dt_presence_col_label }}</span>
+                    <select id="dtOccColSel" class="dt-select"></select>
+                    <button class="dt-apply-btn" style="margin-left:0.8rem;" onclick="applyOccupancy()">{{ UI.dt_apply_btn }}</button>
+                    <button class="dt-reset-btn" onclick="resetOccupancy()">{{ UI.dt_reset_btn }}</button>
+                </div>
+            </div>
+            <div id="dtOccContent"></div>
+
+            <!-- ── Panel 2 : Value distribution ─────────────────────────── -->
+            <div class="dt-filter-panel" style="margin-top:1.2rem; margin-bottom:0.8rem;">
+                <div style="font-size:0.8rem; font-weight:700; color:#1a1a2e; margin-bottom:0.5rem; text-transform:uppercase; letter-spacing:0.04em;">
+                    {{ UI.dt_value_section }}
+                </div>
+                <div class="dt-filter-row">
+                    <span class="dt-filter-label">{{ UI.dt_date_col_label }}</span>
+                    <select id="dtValDateSel" class="dt-select"></select>
+                    <span class="dt-filter-label" style="min-width:auto; margin-left:0.8rem;">{{ UI.dt_value_col_label }}</span>
+                    <select id="dtValColSel" class="dt-select"></select>
+                    <span class="dt-filter-label" style="min-width:auto; margin-left:0.8rem;">{{ UI.dt_agg_label }}</span>
+                    <select id="dtValAggSel" class="dt-select">
+                        <option value="mean">{{ UI.dt_agg_mean }}</option>
+                        <option value="sum">{{ UI.dt_agg_sum }}</option>
+                        <option value="min">{{ UI.dt_agg_min }}</option>
+                        <option value="max">{{ UI.dt_agg_max }}</option>
+                    </select>
+                    <button class="dt-apply-btn" style="margin-left:0.8rem;" onclick="applyValueDist()">{{ UI.dt_apply_btn }}</button>
+                    <button class="dt-reset-btn" onclick="resetValueDist()">{{ UI.dt_reset_btn }}</button>
+                </div>
+            </div>
+            <div id="dtValContent"></div>
+
         </div>
     </div>
 
@@ -507,7 +603,8 @@
                 btn.title = '';
             });
             document.getElementById('datetimeSection').style.display = 'none';
-            document.getElementById('datetimeContent').innerHTML = '';
+            document.getElementById('dtOccContent').innerHTML = '';
+            document.getElementById('dtValContent').innerHTML = '';
             console.log('[Geodata Inspector] Interface cleared');
         });
 
@@ -748,25 +845,29 @@
         }
         
         function renderOccupancyChart(buckets, barClass, yLabel = '', unit = '') {
-            if (!buckets || buckets.length === 0) return '';  // Return empty string instead of "No data"
-        
+            if (!buckets || buckets.length === 0) return '';
+
             const W = 560, H = 110, PAD_L = 36, PAD_R = 8, PAD_T = 6, PAD_B = 42;
             const chartW = W - PAD_L - PAD_R;
             const chartH = H - PAD_T - PAD_B;
-        
+
             const maxCount = Math.max(...buckets.map(b => b.count), 1);
             const n = buckets.length;
             const barW = Math.max(1, chartW / n - 0.5);
-        
-            // Build bars
+            const clickClass = barClass === 'dt-occupancy' ? 'dt-occ-clickable' : 'dt-bar-clickable';
+
+            // Build bars (clickable to set date range)
             let bars = '';
             buckets.forEach((b, i) => {
                 const x = PAD_L + (i / n) * chartW;
                 const bh = (b.count / maxCount) * chartH;
                 const y = PAD_T + chartH - bh;
-                bars += `<rect class="${barClass}" x="${x.toFixed(1)}" y="${y.toFixed(1)}"
-                    width="${barW.toFixed(1)}" height="${bh.toFixed(1)}">
-                    <title>${b.t.slice(0,10)} : ${b.count}</title>
+                const isoDate = b.t.slice(0, 10);
+                bars += `<rect class="${barClass} ${clickClass}"
+                    x="${x.toFixed(1)}" y="${y.toFixed(1)}"
+                    width="${barW.toFixed(1)}" height="${bh.toFixed(1)}"
+                    onclick="_onChartBarClick('${isoDate}', '${unit}')">
+                    <title>${isoDate} : ${b.count}</title>
                 </rect>`;
             });
         
@@ -838,15 +939,307 @@
         }
         function displayDatetime(dt) {
             const section = document.getElementById('datetimeSection');
-            const content = document.getElementById('datetimeContent');
             if (!dt || (!dt.interval_pairs?.length && !dt.singles?.length)) {
                 section.style.display = 'none';
                 return;
             }
-            const html = renderDatetimeAnalysis(dt);
-            content.innerHTML = html;
+            _initTemporalControls(dt);   // populates both panels + renders initial occupancy chart
+            document.getElementById('dtValContent').innerHTML = '';
             section.style.display = 'block';
         }
+
+        // ── Temporal analysis controls ────────────────────────────────────
+        let _currentDtData       = null;
+        let _selectedGranularity = null;
+
+        function setGranularity(gran, btn) {
+            _selectedGranularity = gran === 'auto' ? null : gran;
+            document.querySelectorAll('.dt-gran-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+        }
+
+        function _initTemporalControls(dt) {
+            _currentDtData = dt;
+            const dateCols   = dt.date_columns   || [];
+            const allCols    = dt.all_columns     || [];
+            const pairs      = dt.interval_pairs  || [];
+            const dateColSet = new Set(dateCols);
+
+            // ── Panel 1 – Occupancy: date/interval selector ───────────────
+            const occDateSel = document.getElementById('dtOccDateSel');
+            occDateSel.innerHTML = '';
+            dateCols.forEach(col => {
+                const o = document.createElement('option');
+                o.value = col; o.textContent = col; occDateSel.appendChild(o);
+            });
+            pairs.forEach(pair => {
+                const o = document.createElement('option');
+                o.value = `${pair.col_start}||${pair.col_end}`;
+                o.textContent = `${UI.dt_interval_prefix}: ${pair.col_start} → ${pair.col_end}`;
+                occDateSel.appendChild(o);
+            });
+            // If pairs exist, pre-select the first pair (most useful default)
+            if (pairs.length > 0) occDateSel.value = `${pairs[0].col_start}||${pairs[0].col_end}`;
+
+            // Occupancy: presence-filter column ("All rows" + non-date cols)
+            const occColSel = document.getElementById('dtOccColSel');
+            occColSel.innerHTML = '';
+            const allRowOpt = document.createElement('option');
+            allRowOpt.value = '__all__'; allRowOpt.textContent = UI.dt_all_rows_option;
+            occColSel.appendChild(allRowOpt);
+            allCols.forEach(col => {
+                if (dateColSet.has(col.name)) return;
+                const o = document.createElement('option');
+                o.value = col.name; o.textContent = col.name; occColSel.appendChild(o);
+            });
+
+            // ── Panel 2 – Value distribution: date + numeric col ──────────
+            const valDateSel = document.getElementById('dtValDateSel');
+            valDateSel.innerHTML = '';
+            dateCols.forEach(col => {
+                const o = document.createElement('option');
+                o.value = col; o.textContent = col; valDateSel.appendChild(o);
+            });
+
+            const valColSel = document.getElementById('dtValColSel');
+            valColSel.innerHTML = '';
+            allCols.forEach(col => {
+                if (dateColSet.has(col.name)) return;
+                const o = document.createElement('option');
+                o.value = col.name; o.textContent = col.name; valColSel.appendChild(o);
+            });
+
+            // ── Shared date range from initial extent ─────────────────────
+            let gMin = null, gMax = null;
+            [...pairs, ...(dt.singles || [])].forEach(c => {
+                if (c.global_min && (!gMin || c.global_min < gMin)) gMin = c.global_min;
+                if (c.global_max && (!gMax || c.global_max > gMax)) gMax = c.global_max;
+            });
+            if (gMin) document.getElementById('dtFromDate').value = gMin.slice(0, 10);
+            if (gMax) document.getElementById('dtToDate').value   = gMax.slice(0, 10);
+
+            // Reset granularity
+            _selectedGranularity = null;
+            document.querySelectorAll('.dt-gran-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.gran === 'auto');
+            });
+
+            // Render initial occupancy chart from cached data
+            const initOcc  = pairs[0] || dt.singles?.[0];
+            const initSing = dt.singles?.[0];
+            document.getElementById('dtOccContent').innerHTML =
+                initOcc  ? _renderOccChartFromData(initOcc)  : '';
+            document.getElementById('dtValContent').innerHTML = '';
+        }
+
+        // ── Panel 1: Occupancy ────────────────────────────────────────────
+        function _renderOccChartFromData(data) {
+            if (!data) return '';
+            const isOcc   = data.chart_type === 'occupancy';
+            const yLabel  = isOcc ? UI.dt_y_label_occupancy : UI.dt_y_label_count;
+            const colEnd  = data.col_end || data.end_date_col || '';
+            const title   = isOcc
+                ? `${UI.dt_occupancy_label} — ${data.col_start || data.date_col} → ${colEnd}`
+                : `${UI.dt_histogram_label} — ${data.col || data.date_col}`;
+            const minD = (data.global_min || '').slice(0, 10);
+            const maxD = (data.global_max || '').slice(0, 10);
+            const unit = data.unit || data.granularity || '';
+            let html = `<div class="dt-section">`;
+            html += `<div class="dt-label">${title}</div>`;
+            if (minD && maxD) html += `<div class="dt-meta">${UI.dt_coverage} : ${minD} → ${maxD}</div>`;
+            html += isOcc
+                ? renderStepAreaChart(data.buckets, UI.dt_y_label_occupancy, unit)
+                : renderOccupancyChart(data.buckets, 'dt-bar', yLabel, unit);
+            html += `</div>`;
+            return html;
+        }
+
+        function applyOccupancy() {
+            const dateVal = document.getElementById('dtOccDateSel').value;
+            const presCol = document.getElementById('dtOccColSel').value;
+            let dateColl = dateVal, endDateCol = null;
+            if (dateVal.includes('||')) [dateColl, endDateCol] = dateVal.split('||');
+
+            fetch('/temporal_plot', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    date_col:     dateColl,
+                    end_date_col: endDateCol,
+                    value_col:    (presCol === '__all__') ? null : presCol,
+                    aggregation:  'presence',
+                    date_start:   document.getElementById('dtFromDate').value || null,
+                    date_end:     document.getElementById('dtToDate').value   || null,
+                    granularity:  _selectedGranularity,
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) { console.warn('[Occupancy]', data.error); return; }
+                const isOcc  = data.chart_type === 'occupancy';
+                const colEnd = data.end_date_col || '';
+                const presFiltered = data.value_col ? ` (${data.value_col})` : '';
+                const title  = isOcc
+                    ? `${UI.dt_occupancy_label}${presFiltered} — ${data.date_col} → ${colEnd}`
+                    : `${UI.dt_histogram_label}${presFiltered} — ${data.date_col}`;
+                const minD = (data.global_min || '').slice(0, 10);
+                const maxD = (data.global_max || '').slice(0, 10);
+                const unit = data.granularity || '';
+                let html = `<div class="dt-section">`;
+                html += `<div class="dt-label">${title}</div>`;
+                if (minD && maxD) html += `<div class="dt-meta">${UI.dt_coverage} : ${minD} → ${maxD}</div>`;
+                html += isOcc
+                    ? renderStepAreaChart(data.buckets, UI.dt_y_label_occupancy, unit)
+                    : renderOccupancyChart(data.buckets, 'dt-bar',
+                        data.value_col ? UI.dt_y_label_presence : UI.dt_y_label_count, unit);
+                html += `</div>`;
+                document.getElementById('dtOccContent').innerHTML = html;
+            })
+            .catch(err => console.error('[Occupancy] fetch error:', err));
+        }
+
+        function resetOccupancy() {
+            if (!_currentDtData) return;
+            document.getElementById('dtOccDateSel').value = '';
+            document.getElementById('dtOccColSel').value  = '__all__';
+            const initOcc = (_currentDtData.interval_pairs || [])[0] || (_currentDtData.singles || [])[0];
+            document.getElementById('dtOccContent').innerHTML = initOcc ? _renderOccChartFromData(initOcc) : '';
+        }
+
+        // ── Panel 2: Value distribution ───────────────────────────────────
+        function applyValueDist() {
+            const dateCol = document.getElementById('dtValDateSel').value;
+            const valCol  = document.getElementById('dtValColSel').value;
+            const agg     = document.getElementById('dtValAggSel').value;
+
+            if (!valCol) { console.warn('[Value] no column selected'); return; }
+
+            fetch('/temporal_plot', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    date_col:    dateCol,
+                    value_col:   valCol,
+                    aggregation: agg,
+                    date_start:  document.getElementById('dtFromDate').value || null,
+                    date_end:    document.getElementById('dtToDate').value   || null,
+                    granularity: _selectedGranularity,
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) { console.warn('[Value]', data.error); return; }
+                const title  = `${data.aggregation}(${data.value_col}) — ${data.date_col}`;
+                const minD   = (data.global_min || '').slice(0, 10);
+                const maxD   = (data.global_max || '').slice(0, 10);
+                const unit   = data.granularity || '';
+                let html = `<div class="dt-section">`;
+                html += `<div class="dt-label">${title}</div>`;
+                if (minD && maxD) html += `<div class="dt-meta">${UI.dt_coverage} : ${minD} → ${maxD}</div>`;
+                html += renderOccupancyChart(data.buckets, 'dt-value-bar', UI.dt_y_label_value, unit);
+                html += `</div>`;
+                document.getElementById('dtValContent').innerHTML = html;
+            })
+            .catch(err => console.error('[Value] fetch error:', err));
+        }
+
+        function resetValueDist() {
+            document.getElementById('dtValContent').innerHTML = '';
+        }
+
+        // ── Step-area chart (true occupancy curve) ────────────────────────
+        function renderStepAreaChart(buckets, yLabel, unit) {
+            if (!buckets || buckets.length === 0) return '';
+            const W = 560, H = 120, PL = 40, PR = 8, PT = 6, PB = 42;
+            const cW = W - PL - PR, cH = H - PT - PB;
+            const maxV = Math.max(...buckets.map(b => b.count), 1);
+            const n = buckets.length;
+            const xOf = i  => PL + (i / n) * cW;
+            const yOf = v  => PT + cH - (v / maxV) * cH;
+
+            // Step-area filled path + stroke path
+            let area = `M ${xOf(0).toFixed(1)} ${(PT + cH).toFixed(1)}`;
+            let line = '';
+            for (let i = 0; i < n; i++) {
+                const x1 = xOf(i).toFixed(1), x2 = xOf(i + 1).toFixed(1);
+                const y  = yOf(buckets[i].count).toFixed(1);
+                area += ` L ${x1} ${y} L ${x2} ${y}`;
+                line += (i === 0 ? `M ${x1} ${y}` : '') + ` L ${x1} ${y} L ${x2} ${y}`;
+            }
+            area += ` L ${xOf(n).toFixed(1)} ${(PT + cH).toFixed(1)} Z`;
+
+            // Invisible hover bars for tooltip + click
+            const bW = Math.max(1, cW / n);
+            let hovers = '';
+            buckets.forEach((b, i) => {
+                const isoDate = b.t.slice(0, 10);
+                hovers += `<rect x="${xOf(i).toFixed(1)}" y="${PT}" width="${bW.toFixed(1)}" height="${cH}"
+                    fill="transparent" style="cursor:pointer;"
+                    onclick="_onChartBarClick('${isoDate}','${unit}')">
+                    <title>${isoDate} : ${b.count}</title></rect>`;
+            });
+
+            // Axes
+            const yAxis = `
+                <line x1="${PL}" y1="${PT}" x2="${PL}" y2="${PT+cH}" stroke="#cfd8dc" stroke-width="1"/>
+                <text class="dt-axis-label" x="${PL-3}" y="${PT+4}"  text-anchor="end">${maxV}</text>
+                <text class="dt-axis-label" x="${PL-3}" y="${PT+cH}" text-anchor="end">0</text>`;
+            const maxL = Math.min(8, n), step = Math.max(1, Math.floor(n / maxL));
+            const idxs = [];
+            for (let i = 0; i < n; i += step) idxs.push(i);
+            if (idxs[idxs.length-1] !== n-1) idxs.push(n-1);
+            function fmtL(s) {
+                if (!s) return '';
+                const d = s.slice(0, 10);
+                if (unit === 'year') return d.slice(0,4);
+                if (unit === 'month') return d.slice(0,7);
+                return d;
+            }
+            let xLabels = `<line x1="${PL}" y1="${PT+cH}" x2="${W-PR}" y2="${PT+cH}" stroke="#cfd8dc" stroke-width="1"/>`;
+            idxs.forEach(i => {
+                if (!buckets[i]) return;
+                const x = (xOf(i) + bW/2).toFixed(1);
+                xLabels += `<text class="dt-axis-label" transform="rotate(-35,${x},${PT+cH+8})"
+                    x="${x}" y="${PT+cH+8}" text-anchor="end">${fmtL(buckets[i].t)}</text>`;
+            });
+            const yLSvg  = yLabel ? `<text class="dt-axis-label" transform="rotate(-90)" x="${-(PT+cH/2)}" y="9" text-anchor="middle">${yLabel}</text>` : '';
+            const badge  = unit   ? `<text class="dt-axis-label" x="${W-PR}" y="${H-2}" text-anchor="end" style="fill:#00897b;font-weight:600;">/ ${unit}</text>` : '';
+
+            return `<div class="dt-chart-wrap">
+                <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
+                    ${yLSvg}${yAxis}${xLabels}${badge}
+                    <path d="${area}" fill="#00897b" opacity="0.2"/>
+                    <path d="${line}" fill="none" stroke="#00897b" stroke-width="2"/>
+                    ${hovers}
+                </svg>
+            </div>`;
+        }
+
+        function resetTemporalFilter() {
+            if (!_currentDtData) return;
+            _initTemporalControls(_currentDtData);
+        }
+
+        function _onChartBarClick(isoDate, unit) {
+            let start, end;
+            const d = new Date(isoDate + 'T00:00:00');
+            if (unit === 'year') {
+                start = `${d.getFullYear()}-01-01`;
+                end   = `${d.getFullYear()}-12-31`;
+            } else if (unit === 'month') {
+                const y = d.getFullYear(), m = d.getMonth() + 1;
+                const lastDay = new Date(y, m, 0).getDate();
+                start = `${y}-${String(m).padStart(2,'0')}-01`;
+                end   = `${y}-${String(m).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;
+            } else {
+                start = isoDate.slice(0, 10);
+                end   = isoDate.slice(0, 10);
+            }
+            document.getElementById('dtFromDate').value = start;
+            document.getElementById('dtToDate').value   = end;
+            applyTemporalFilter();
+        }
+
         // ── Glossary tooltips ─────────────────────────────────────────────
         const GLOSSARY_FR_KEYS = [
             "Score de complétude global",

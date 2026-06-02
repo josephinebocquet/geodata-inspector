@@ -1,23 +1,42 @@
-# Geodata Inspector 
+# Geodata Inspector
 
 A high-performance geodata inspection tool using DuckDB for fast CSV/Excel processing and comprehensive spatial analysis. Available as a web application and a Python library.
 
 ## Features
 
-- **Multi-format Support**: CSV, Excel (.xlsx), GeoJSON, Shapefile, GeoPackage
+- **Multi-format Support**: CSV, TXT, Excel (.xlsx), GeoJSON, Shapefile, GeoPackage, ZIP
 - **Automatic Geometry Detection**: Points, LineStrings, Polygons, WKT, GeoJSON, native geometry columns
 - **CRS Detection**: Automatically detects coordinate reference systems; area and density always computed in km² regardless of source CRS
 - **Multi-country Support**: Built-in reference files and geographic key patterns for France, UK, Germany, Italy, Spain, USA, and Europe (NUTS)
 - **Spatial Metrics**: Area, density, coverage, complexity, duplicates, fill rate
+- **Temporal Analysis**: Automatic detection of date columns with interactive occupancy curves and histograms; filter by date range, column selection, and granularity (year/month/day)
 - **Bilingual Interface**: French/English with hover tooltips (ⓘ) explaining each metric
 - **Batch Processing**: Process directories or ZIP archives via the web UI or library
 - **Multiple Export Formats**: GeoJSON, GeoPackage, Shapefile, CSV+WKT
 
 ## Installation
 
+### Option 1 — Conda (recommended)
+
+```bash
+# Create and populate the environment from the lock file
+conda env create -f environment.yml
+
+# Activate it
+conda activate geodata_env
+```
+
+To update an existing environment after changes to `environment.yml`:
+
+```bash
+conda env update -f environment.yml --prune
+```
+
+### Option 2 — pip only
+
 ```bash
 pip install -r requirements.txt
-# or
+# or (editable install of the library)
 pip install -e .
 ```
 
@@ -170,6 +189,32 @@ if inspector.summary_rows:
     print(f"CRS: {summary['CRS']}")
     print(f"Rows: {summary['Nb lignes']}")
 ```
+
+## Temporal Analysis
+
+When date or timestamp columns are detected in a file, the web UI shows an interactive **Temporal analysis** section below the spatial metrics.
+
+### Chart types
+
+| Detected pattern | Chart |
+|---|---|
+| A pair of columns matching start/end keywords (e.g. `date_debut` / `date_fin`) | **Occupancy curve** — count of active intervals at each time point |
+| Any other date column | **Distribution histogram** — row count per time period |
+
+The granularity (year / month / day) is chosen automatically based on the data's time span, but can be overridden manually.
+
+### Interactive filters
+
+| Control | Effect |
+|---|---|
+| **Column checkboxes** | Show or hide individual date column charts |
+| **From / To date inputs** | Restrict the displayed period |
+| **Granularity buttons** | Force year / month / day aggregation (Auto = adaptive) |
+| **Apply** | Re-compute charts with the current filter settings |
+| **Reset** | Restore original charts and clear all filters |
+| **Click a bar** | Instantly zoom into that year, month, or day |
+
+Filters call the `/temporal_filter` endpoint, which re-aggregates the cached fine-grained data without re-reading the source file.
 
 ## Metrics Reference
 

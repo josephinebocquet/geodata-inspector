@@ -33,6 +33,7 @@ from .spatial import taux_de_remplissage, complexite_moyenne, pourcentage_geomet
 # ============================================================================
 summary_rows = []
 last_gdf = None
+last_dt_raw = None  # Fine-grained temporal data for re-computation with filters
 
 # Initialize DuckDB with spatial extension
 def get_duckdb_connection():
@@ -1907,6 +1908,10 @@ def analyze_datetime_columns(conn, table_name, raw_filepath=None):
             print(f"[DateTime] Raw format detection failed: {e}")
 
     interval_pairs_meta, singles_meta = classify_date_columns(date_cols)
+
+    # Store fine-grained data for subsequent filtering while connection is open
+    _store_raw_temporal(conn, table_name, date_cols, raw_formats, interval_pairs_meta)
+
     interval_results = []
     for col_s, col_e in interval_pairs_meta:
         result = compute_occupancy_curve(conn, table_name, col_s, col_e, raw_formats=raw_formats)
@@ -1924,7 +1929,465 @@ def analyze_datetime_columns(conn, table_name, raw_filepath=None):
             "date_columns": date_cols,
             "interval_pairs": interval_results,
             "singles": single_results,
+            "all_columns": last_dt_raw.get("all_columns", []),
         }
+
+
+def _store_raw_temporal(conn, table_name, date_cols, raw_formats, interval_pairs):
+    """
+    Store fine-grained (daily or monthly) temporal data globally so
+    recompute_temporal_charts() can re-aggregate with filters later.
+    """
+    global last_dt_raw
+    last_dt_raw = {
+        "singles": {}, "intervals": {},
+        "all_date_cols": date_cols,
+        "raw_formats":   dict(raw_formats),   # stored for /temporal_plot reuse
+        "all_columns":   [],
+    }
+
+    # Store every column name + type so the frontend can build the Y-axis selector
+    try:
+        schema_df = conn.execute(f"DESCRIBE {table_name}").fetchdf()
+        last_dt_raw["all_columns"] = [
+            {"name": row["column_name"], "type": row["column_type"]}
+            for _, row in schema_df.iterrows()
+        ]
+    except Exception as _exc:
+        print(f"[DateTime] all_columns store failed: {_exc}")
+
+    def _te(col):
+        fmt = raw_formats.get(col)
+        if fmt is None:
+            return f'CAST("{col}" AS TIMESTAMP)'
+        if fmt:
+            return f"TRY_STRPTIME(CAST(\"{col}\" AS VARCHAR), '{fmt}')"
+        return f'CAST("{col}" AS TIMESTAMP)'
+
+    for col in date_cols:
+        te = _te(col)
+        try:
+            ext = conn.execute(f"""
+                SELECT MIN({te}), MAX({te})
+                FROM {table_name}
+                WHERE "{col}" IS NOT NULL AND YEAR({te}) >= 1800
+            """).fetchone()
+            if not ext or ext[0] is None:
+                continue
+            t_min, t_max = ext
+            cov_days = (t_max - t_min).days if hasattr(t_max - t_min, "days") else 0
+            raw_gran = "month" if cov_days > 365 * 10 else "day"
+            rows = conn.execute(f"""
+                SELECT DATE_TRUNC('{raw_gran}', {te}) AS period, COUNT(*) AS cnt
+                FROM {table_name}
+                WHERE "{col}" IS NOT NULL AND YEAR({te}) >= 1800
+                GROUP BY period ORDER BY period
+            """).fetchall()
+            last_dt_raw["singles"][col] = {
+                "granularity": raw_gran,
+                "global_min":  t_min.isoformat(),
+                "global_max":  t_max.isoformat(),
+                "data": [
+                    (r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0]), int(r[1]))
+                    for r in rows
+                ],
+            }
+        except Exception as exc:
+            print(f"[DateTime] _store_raw_temporal failed for '{col}': {exc}")
+
+    for col_s, col_e in interval_pairs:
+        te_s, te_e = _te(col_s), _te(col_e)
+        try:
+            ext = conn.execute(f"""
+                SELECT MIN({te_s}), MAX({te_e})
+                FROM {table_name}
+                WHERE "{col_s}" IS NOT NULL AND "{col_e}" IS NOT NULL
+                  AND YEAR({te_s}) >= 1800 AND YEAR({te_e}) >= 1800
+            """).fetchone()
+            if not ext or ext[0] is None:
+                continue
+            t_min, t_max = ext
+            cov_days = (t_max - t_min).days if hasattr(t_max - t_min, "days") else 0
+            n_pts = min(500, max(30, cov_days))
+            step = max(1, cov_days // n_pts)
+
+            conn.execute(f"""
+                CREATE OR REPLACE TEMP TABLE _raw_tax AS
+                SELECT TIMESTAMP '{t_min.isoformat()}' +
+                       (INTERVAL 1 DAY * CAST(generate_series * {step} AS BIGINT)) AS bucket_ts
+                FROM generate_series(0, {n_pts})
+            """)
+            conn.execute(f"""
+                CREATE OR REPLACE TEMP TABLE _raw_occ AS
+                SELECT a.bucket_ts, COUNT(d."{col_s}") AS active_count
+                FROM _raw_tax a
+                LEFT JOIN {table_name} d
+                    ON {te_s} <= a.bucket_ts AND {te_e} >= a.bucket_ts
+                   AND d."{col_s}" IS NOT NULL AND d."{col_e}" IS NOT NULL
+                   AND YEAR({te_s}) >= 1800 AND YEAR({te_e}) >= 1800
+                GROUP BY a.bucket_ts ORDER BY a.bucket_ts
+            """)
+            rows = conn.execute("SELECT bucket_ts, active_count FROM _raw_occ").fetchall()
+            conn.execute("DROP TABLE IF EXISTS _raw_tax")
+            conn.execute("DROP TABLE IF EXISTS _raw_occ")
+
+            key = f"{col_s}||{col_e}"
+            last_dt_raw["intervals"][key] = {
+                "col_start":  col_s,
+                "col_end":    col_e,
+                "global_min": t_min.isoformat(),
+                "global_max": t_max.isoformat(),
+                "step_days":  step,
+                "data": [
+                    (r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0]), int(r[1]))
+                    for r in rows
+                ],
+            }
+        except Exception as exc:
+            print(f"[DateTime] _store_raw_temporal failed for interval ({col_s},{col_e}): {exc}")
+
+
+def recompute_temporal_charts(columns=None, date_start=None, date_end=None, granularity=None):
+    """
+    Re-compute temporal charts from cached raw data with optional filters.
+
+    columns    : list of column names to include (None = all detected columns)
+    date_start : ISO date string lower bound  (None = no lower bound)
+    date_end   : ISO date string upper bound  (None = no upper bound)
+    granularity: 'year'|'month'|'day'|None   (None = auto from effective coverage)
+
+    Returns a dict in the same format as analyze_datetime_columns, or None if no
+    cached data exists.
+    """
+    import datetime
+    from collections import defaultdict
+
+    if last_dt_raw is None:
+        return None
+
+    def _parse(s):
+        if not s:
+            return None
+        try:
+            return datetime.date.fromisoformat(str(s)[:10])
+        except Exception:
+            return None
+
+    def _auto_gran(days):
+        if days > 365 * 2:
+            return "year"
+        if days > 60:
+            return "month"
+        return "day"
+
+    f_start = _parse(date_start)
+    f_end   = _parse(date_end)
+
+    def _eff_range(g_min_str, g_max_str):
+        g_min = _parse(g_min_str)
+        g_max = _parse(g_max_str)
+        eff_s = max(g_min, f_start) if (f_start and g_min) else (f_start or g_min)
+        eff_e = min(g_max, f_end)   if (f_end   and g_max) else (f_end   or g_max)
+        return eff_s, eff_e
+
+    # ── Singles (histograms) ─────────────────────────────────────────────────
+    singles_out = []
+    for col, raw in last_dt_raw.get("singles", {}).items():
+        if columns and col not in columns:
+            continue
+        eff_s, eff_e = _eff_range(raw.get("global_min", ""), raw.get("global_max", ""))
+        if eff_s and eff_e and eff_s > eff_e:
+            continue
+        cov = (eff_e - eff_s).days if (eff_s and eff_e) else 0
+        tgt = granularity or _auto_gran(cov)
+
+        acc = defaultdict(int)
+        for date_str, count in raw.get("data", []):
+            d = _parse(date_str)
+            if d is None or (eff_s and d < eff_s) or (eff_e and d > eff_e):
+                continue
+            key = (f"{d.year}-01-01" if tgt == "year"
+                   else f"{d.year}-{d.month:02d}-01" if tgt == "month"
+                   else date_str[:10])
+            acc[key] += count
+
+        singles_out.append({
+            "col":           col,
+            "global_min":    eff_s.isoformat() if eff_s else raw.get("global_min", "")[:10],
+            "global_max":    eff_e.isoformat() if eff_e else raw.get("global_max", "")[:10],
+            "coverage_days": cov,
+            "unit":          tgt,
+            "chart_type":    "histogram",
+            "buckets":       [{"t": k, "count": v} for k, v in sorted(acc.items())],
+        })
+
+    # ── Interval pairs (occupancy curves) ────────────────────────────────────
+    intervals_out = []
+    for key_str, raw in last_dt_raw.get("intervals", {}).items():
+        col_s = raw.get("col_start", "")
+        col_e = raw.get("col_end", "")
+        if columns and col_s not in columns and col_e not in columns:
+            continue
+        eff_s, eff_e = _eff_range(raw.get("global_min", ""), raw.get("global_max", ""))
+        if eff_s and eff_e and eff_s > eff_e:
+            continue
+        cov = (eff_e - eff_s).days if (eff_s and eff_e) else 0
+        tgt = granularity or _auto_gran(cov)
+
+        # Occupancy: take MAX within aggregation period (curve shows count-at-time-t)
+        acc = defaultdict(int)
+        for date_str, count in raw.get("data", []):
+            d = _parse(date_str)
+            if d is None or (eff_s and d < eff_s) or (eff_e and d > eff_e):
+                continue
+            key = (f"{d.year}-01-01" if tgt == "year"
+                   else f"{d.year}-{d.month:02d}-01" if tgt == "month"
+                   else date_str[:10])
+            if count > acc[key]:
+                acc[key] = count
+
+        intervals_out.append({
+            "col_start":           col_s,
+            "col_end":             col_e,
+            "global_min":          eff_s.isoformat() if eff_s else raw.get("global_min", "")[:10],
+            "global_max":          eff_e.isoformat() if eff_e else raw.get("global_max", "")[:10],
+            "coverage_days":       cov,
+            "unit":                tgt,
+            "median_duration_days": 0,
+            "chart_type":          "occupancy",
+            "buckets":             [{"t": k, "count": v} for k, v in sorted(acc.items())],
+        })
+
+    return {
+        "_datetime":      True,
+        "date_columns":   last_dt_raw.get("all_date_cols", []),
+        "interval_pairs": intervals_out,
+        "singles":        singles_out,
+    }
+
+
+def compute_column_occupancy(filepath, file_ext, date_col, end_date_col=None,
+                              value_col=None, aggregation="presence",
+                              date_start=None, date_end=None,
+                              granularity=None, raw_formats=None, n_buckets=100):
+    """
+    Compute presence/occupancy or value aggregation of a column over time.
+
+    X-axis mode (selected by end_date_col):
+    - Histogram     (end_date_col=None)  : one bar per time bucket using date_col
+    - Occupancy     (end_date_col set)   : count of active intervals at each bucket
+
+    Y-axis mode (selected by aggregation):
+    - "presence" : COUNT of non-null value_col rows (or all rows when value_col=None)
+    - "mean"/"sum"/"min"/"max" : numeric aggregate of value_col per bucket
+      (occupancy curve mode always uses "presence" regardless of this setting)
+
+    Parameters
+    ----------
+    filepath      : path to the file kept in PREVIEW_DIR
+    file_ext      : ".csv", ".xlsx", ".geojson", etc.
+    date_col      : start (or single) date column
+    end_date_col  : end date column → switches to occupancy curve mode
+    value_col     : column to measure; None = count all rows
+    aggregation   : "presence"|"mean"|"sum"|"min"|"max"
+    date_start    : ISO date string lower bound  (None = no filter)
+    date_end      : ISO date string upper bound  (None = no filter)
+    granularity   : "year"|"month"|"day"|None   (None = auto from time span)
+    raw_formats   : optional {col: strptime_format} hints from prior inspection
+    n_buckets     : number of time-axis points for occupancy curve mode
+
+    Returns dict with "buckets" list of {t, count}, or None on error.
+    """
+    import duckdb as _duckdb
+    import datetime as _dt
+    from collections import defaultdict
+
+    raw_formats = raw_formats or {}
+    ext = file_ext.lower()
+
+    conn = _duckdb.connect(':memory:')
+    try:
+        conn.execute("INSTALL spatial; LOAD spatial;")
+    except Exception:
+        pass
+
+    try:
+        safe = filepath.replace("\\", "/")
+        if ext in ('.csv', '.txt'):
+            conn.execute(f"""
+                CREATE TABLE _d AS
+                SELECT * FROM read_csv_auto('{safe}',
+                    ignore_errors=true, header=true, sample_size=-1)
+            """)
+        elif ext == '.xlsx':
+            import pandas as _pd
+            _df = _pd.read_excel(filepath)
+            conn.execute("CREATE TABLE _d AS SELECT * FROM _df")
+        elif ext in ('.geojson', '.json', '.shp', '.gpkg'):
+            import geopandas as _gpd
+            _gdf = _gpd.read_file(filepath)
+            _df = _gdf.drop(columns=['geometry'], errors='ignore')
+            conn.execute("CREATE TABLE _d AS SELECT * FROM _df")
+        else:
+            return None
+
+        # ── Build timestamp expression for any column ─────────────────────
+        schema_df = conn.execute("DESCRIBE _d").fetchdf()
+        col_types  = dict(zip(schema_df['column_name'], schema_df['column_type']))
+
+        def _te(col):
+            ct = col_types.get(col, '').upper()
+            if any(k in ct for k in ('DATE', 'TIMESTAMP', 'TIME')):
+                return f'CAST("{col}" AS TIMESTAMP)'
+            if col in raw_formats and raw_formats[col]:
+                return f"TRY_STRPTIME(CAST(\"{col}\" AS VARCHAR), '{raw_formats[col]}')"
+            sample = conn.execute(
+                f'SELECT "{col}" FROM _d WHERE "{col}" IS NOT NULL LIMIT 1'
+            ).fetchone()
+            s = str(sample[0]).strip() if sample else ''
+            if re.match(r'^\d{2}/\d{2}/\d{4}', s):
+                return f"TRY_STRPTIME(CAST(\"{col}\" AS VARCHAR), '%d/%m/%Y')"
+            if re.match(r'^\d{4}/\d{2}/\d{2}', s):
+                return f"TRY_STRPTIME(CAST(\"{col}\" AS VARCHAR), '%Y/%m/%d')"
+            return f'CAST("{col}" AS TIMESTAMP)'
+
+        te_s = _te(date_col)
+        te_e = _te(end_date_col) if end_date_col else None
+
+        # ── Global temporal extent ────────────────────────────────────────
+        if end_date_col:
+            ext_row = conn.execute(f"""
+                SELECT MIN({te_s}), MAX({te_e}) FROM _d
+                WHERE "{date_col}" IS NOT NULL AND "{end_date_col}" IS NOT NULL
+                  AND YEAR({te_s}) >= 1800 AND YEAR({te_e}) >= 1800
+            """).fetchone()
+        else:
+            ext_row = conn.execute(f"""
+                SELECT MIN({te_s}), MAX({te_s}) FROM _d
+                WHERE "{date_col}" IS NOT NULL AND YEAR({te_s}) >= 1800
+            """).fetchone()
+
+        if not ext_row or ext_row[0] is None:
+            return None
+        t_min, t_max = ext_row
+
+        # ── Auto granularity ──────────────────────────────────────────────
+        if not granularity:
+            g_s = _dt.date.fromisoformat(t_min.isoformat()[:10]) if hasattr(t_min, 'isoformat') else None
+            g_e = _dt.date.fromisoformat(t_max.isoformat()[:10]) if hasattr(t_max, 'isoformat') else None
+            e_s = _dt.date.fromisoformat(date_start) if date_start else g_s
+            e_e = _dt.date.fromisoformat(date_end)   if date_end   else g_e
+            cov = (e_e - e_s).days if (e_s and e_e) else 0
+            if cov > 365 * 2:   granularity = 'year'
+            elif cov > 60:      granularity = 'month'
+            else:               granularity = 'day'
+
+        trunc = {'year': 'year', 'month': 'month', 'day': 'day'}.get(granularity, 'month')
+        # Optional value-column presence filter (shared by both modes)
+        val_join_cond = f'AND d."{value_col}" IS NOT NULL' if value_col else ''
+        val_where     = f'AND "{value_col}" IS NOT NULL'   if value_col else ''
+
+        # ── Occupancy curve mode ──────────────────────────────────────────
+        if end_date_col:
+            cov_days = (t_max - t_min).days if hasattr(t_max - t_min, 'days') else 365
+            step = max(1, cov_days // n_buckets)
+
+            conn.execute(f"""
+                CREATE OR REPLACE TEMP TABLE _tax AS
+                SELECT TIMESTAMP '{t_min.isoformat()}' +
+                       (INTERVAL 1 DAY * CAST(generate_series * {step} AS BIGINT)) AS bucket_ts
+                FROM generate_series(0, {n_buckets})
+            """)
+            conn.execute(f"""
+                CREATE OR REPLACE TEMP TABLE _occ AS
+                SELECT a.bucket_ts, COUNT(d."{date_col}") AS active_count
+                FROM _tax a
+                LEFT JOIN _d d
+                    ON {te_s} <= a.bucket_ts
+                   AND {te_e} >= a.bucket_ts
+                   AND d."{date_col}" IS NOT NULL AND d."{end_date_col}" IS NOT NULL
+                   AND YEAR({te_s}) >= 1800 AND YEAR({te_e}) >= 1800
+                   {val_join_cond}
+                GROUP BY a.bucket_ts ORDER BY a.bucket_ts
+            """)
+
+            # Apply date range filter
+            range_conds = []
+            if date_start: range_conds.append(f"bucket_ts >= TIMESTAMP '{date_start} 00:00:00'")
+            if date_end:   range_conds.append(f"bucket_ts <= TIMESTAMP '{date_end} 23:59:59'")
+            where_str = ('WHERE ' + ' AND '.join(range_conds)) if range_conds else ''
+            occ_rows = conn.execute(f"SELECT bucket_ts, active_count FROM _occ {where_str}").fetchall()
+            conn.execute("DROP TABLE IF EXISTS _tax; DROP TABLE IF EXISTS _occ")
+
+            # Re-aggregate to requested granularity (take max per bucket for occupancy curve)
+            acc = defaultdict(int)
+            for r in occ_rows:
+                d = r[0]
+                if d is None: continue
+                if granularity == 'year':   k = f"{d.year}-01-01"
+                elif granularity == 'month': k = f"{d.year}-{d.month:02d}-01"
+                else:                       k = d.isoformat()[:10]
+                if int(r[1]) > acc[k]: acc[k] = int(r[1])
+
+            buckets = [{"t": k, "count": v} for k, v in sorted(acc.items())]
+            chart_type = "occupancy"
+
+        # ── Histogram mode ────────────────────────────────────────────────
+        else:
+            where_parts = [f'"{date_col}" IS NOT NULL', f'YEAR({te_s}) >= 1800']
+            if date_start: where_parts.append(f"{te_s} >= TIMESTAMP '{date_start} 00:00:00'")
+            if date_end:   where_parts.append(f"{te_s} <= TIMESTAMP '{date_end} 23:59:59'")
+
+            use_agg = aggregation in ('mean', 'sum', 'min', 'max') and value_col
+
+            if use_agg:
+                # Numeric aggregation: only include rows where value_col is parseable
+                where_parts.append(f'TRY_CAST("{value_col}" AS DOUBLE) IS NOT NULL')
+                func = {'mean': 'AVG', 'sum': 'SUM', 'min': 'MIN', 'max': 'MAX'}[aggregation]
+                select_val = f'{func}(TRY_CAST("{value_col}" AS DOUBLE)) AS val'
+            else:
+                # Presence / count mode
+                if val_where: where_parts.append(f'"{value_col}" IS NOT NULL')
+                select_val = 'COUNT(*) AS val'
+
+            where = ' AND '.join(where_parts)
+            rows = conn.execute(f"""
+                SELECT DATE_TRUNC('{trunc}', {te_s}) AS period, {select_val}
+                FROM _d WHERE {where}
+                GROUP BY period ORDER BY period
+            """).fetchall()
+
+            def _to_count(v):
+                if v is None: return 0
+                try: return round(float(v), 4)
+                except: return 0
+
+            buckets = [
+                {"t": r[0].isoformat() if hasattr(r[0], 'isoformat') else str(r[0]),
+                 "count": _to_count(r[1])}
+                for r in rows if r[0] is not None
+            ]
+            chart_type = "histogram"
+
+        return {
+            "date_col":     date_col,
+            "end_date_col": end_date_col,
+            "value_col":    value_col,
+            "aggregation":  aggregation,
+            "granularity":  granularity,
+            "chart_type":   chart_type,
+            "global_min":   t_min.isoformat() if hasattr(t_min, 'isoformat') else str(t_min),
+            "global_max":   t_max.isoformat() if hasattr(t_max, 'isoformat') else str(t_max),
+            "buckets":      buckets,
+        }
+
+    except Exception as exc:
+        print(f"[DateTime] compute_column_occupancy failed: {exc}")
+        import traceback; traceback.print_exc()
+        return None
+    finally:
+        conn.close()
+
 
 def inspect_excel(filepath, gdf_metro, sample_size=5000, geo_key_patterns=None, wgs84_bounds=None, metric_crs=None):
     """

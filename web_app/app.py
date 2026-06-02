@@ -107,6 +107,50 @@ COLUMN_ORDER = [
 ]
 
 
+def _sanitize_shp_columns(gdf):
+    """
+    Rename GeoDataFrame columns to DBF-safe names before shapefile export.
+
+    Rules applied:
+    - Strip accents / diacritics → pure ASCII
+    - Replace non-alphanumeric characters with underscores
+    - Truncate to 10 characters (DBF field-name limit)
+    - Deduplicate: append _1, _2 … when truncated names collide
+
+    Returns (renamed GeoDataFrame, {original_name: safe_name} mapping dict).
+    A mapping CSV is useful to ship alongside the shapefile.
+    """
+    import unicodedata
+    import re as _re
+
+    def _to_ascii(s):
+        nfd = unicodedata.normalize("NFD", str(s))
+        ascii_s = "".join(c for c in nfd if not unicodedata.combining(c))
+        ascii_s = _re.sub(r"[^\w]", "_", ascii_s)
+        ascii_s = _re.sub(r"_+", "_", ascii_s).strip("_")
+        return ascii_s or "field"
+
+    mapping = {}
+    seen    = {}
+    rename  = {}
+
+    for col in gdf.columns:
+        if col == "geometry":
+            continue
+        base = _to_ascii(col)[:10]
+        n = seen.get(base, 0)
+        seen[base] = n + 1
+        if n == 0:
+            safe = base
+        else:
+            suffix = f"_{n}"
+            safe = base[: 10 - len(suffix)] + suffix
+        mapping[col] = safe
+        rename[col]  = safe
+
+    return gdf.rename(columns=rename), mapping
+
+
 def _make_serializable(obj):
     """Recursively convert numpy/pandas types to JSON-serializable Python types."""
     if isinstance(obj, dict):
@@ -820,7 +864,94 @@ def datetime_analysis():
     if not dt:
         return jsonify({"available": False, "message": "No date columns detected."})
     return jsonify({"available": True, **_make_serializable(dt)})
-    
+
+
+@app.route("/temporal_plot", methods=["POST"])
+def temporal_plot():
+    """
+    Compute presence/occupancy of a column over time by re-reading the cached file.
+
+    JSON body:
+      date_col     : start (or single) date column  (required)
+      end_date_col : end date column — if set, uses occupancy-curve mode (optional)
+      value_col    : column whose non-null presence to measure; null = all rows
+      date_start   : ISO date lower bound  (optional)
+      date_end     : ISO date upper bound  (optional)
+      granularity  : "year"|"month"|"day"  (optional, null = auto)
+    """
+    path = last_preview_path.get("path")
+    ext  = last_preview_path.get("ext", "")
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "No file available. Upload a file first."}), 404
+
+    body         = request.get_json(silent=True) or {}
+    date_col     = body.get("date_col")
+    end_date_col = body.get("end_date_col") or None
+    value_col    = body.get("value_col") or None
+    aggregation  = body.get("aggregation", "presence")
+    date_start   = body.get("date_start") or None
+    date_end     = body.get("date_end")   or None
+    granularity  = body.get("granularity") or None
+
+    if not date_col:
+        return jsonify({"error": "date_col is required"}), 400
+    if granularity not in (None, "year", "month", "day"):
+        return jsonify({"error": "granularity must be 'year', 'month', 'day', or null"}), 400
+    if aggregation not in ("presence", "mean", "sum", "min", "max"):
+        return jsonify({"error": "aggregation must be one of: presence, mean, sum, min, max"}), 400
+
+    raw_formats = (inspector.last_dt_raw or {}).get("raw_formats", {})
+
+    result = inspector.compute_column_occupancy(
+        filepath=path, file_ext=ext,
+        date_col=date_col, end_date_col=end_date_col,
+        value_col=value_col, aggregation=aggregation,
+        date_start=date_start, date_end=date_end,
+        granularity=granularity, raw_formats=raw_formats,
+    )
+    if result is None:
+        return jsonify({"error": "Could not compute temporal chart. Check column names and date format."}), 500
+
+    return jsonify(_make_serializable(result))
+
+
+@app.route("/temporal_filter", methods=["POST"])
+def temporal_filter():
+    """
+    Re-compute temporal charts from cached raw data with optional filters.
+
+    Expected JSON body:
+      {
+        "columns":    ["col1", "col2"],   // null or omitted = all columns
+        "date_start": "2010-01-01",       // null or omitted = no lower bound
+        "date_end":   "2020-12-31",       // null or omitted = no upper bound
+        "granularity": "month"            // "year"|"month"|"day"|null = auto
+      }
+    """
+    if inspector.last_dt_raw is None:
+        return jsonify({"error": "No temporal data cached. Upload a file first."}), 404
+
+    body = request.get_json(silent=True) or {}
+    columns     = body.get("columns")      or None
+    date_start  = body.get("date_start")   or None
+    date_end    = body.get("date_end")     or None
+    granularity = body.get("granularity")  or None
+
+    if granularity not in (None, "year", "month", "day"):
+        return jsonify({"error": "granularity must be 'year', 'month', 'day', or null"}), 400
+
+    result = inspector.recompute_temporal_charts(
+        columns=columns,
+        date_start=date_start,
+        date_end=date_end,
+        granularity=granularity,
+    )
+    if result is None:
+        return jsonify({"error": "Re-computation failed (no cached data)."}), 500
+
+    return jsonify(_make_serializable(result))
+
+
 @app.route("/export", methods=["GET"])
 def export():
     """Export the full dataset as a geospatial file by re-reading the original."""
@@ -927,17 +1058,54 @@ def export():
             download_name = f"{base_name}.gpkg"
 
         elif fmt == "shp":
-            shp_path = os.path.join(PREVIEW_DIR, f"{base_name}_export.shp")
-            gdf.to_crs(epsg=2154).to_file(shp_path, driver="ESRI Shapefile")
+            shp_path  = os.path.join(PREVIEW_DIR, f"{base_name}_export.shp")
+            shp_base  = os.path.splitext(shp_path)[0]
+
+            gdf_proj = gdf.to_crs(epsg=2154).copy()
+
+            # Cast any object columns that look like dates to proper datetime so
+            # fiona writes them as Date fields instead of String.
+            for col in gdf_proj.columns:
+                if col == "geometry":
+                    continue
+                if gdf_proj[col].dtype == object:
+                    try:
+                        converted = pd.to_datetime(gdf_proj[col], dayfirst=True, errors="coerce")
+                        # Only replace if most values parsed successfully
+                        if converted.notna().mean() > 0.5:
+                            gdf_proj[col] = converted
+                    except Exception:
+                        pass
+
+            # Sanitize column names: strip accents, ASCII-only, max 10 chars, no dupes
+            gdf_shp, col_mapping = _sanitize_shp_columns(gdf_proj)
+
+            # Write shapefile with explicit UTF-8 encoding
+            gdf_shp.to_file(shp_path, driver="ESRI Shapefile", encoding="utf-8")
+
+            # Write .cpg sidecar so GIS tools know the encoding
+            with open(shp_base + ".cpg", "w") as _cpg:
+                _cpg.write("UTF-8")
+
+            # Bundle a field-name mapping CSV so users can reconstruct original names
+            import csv as _csv
+            mapping_path = shp_base + "_field_names.csv"
+            with open(mapping_path, "w", encoding="utf-8-sig", newline="") as _mf:
+                writer = _csv.writer(_mf)
+                writer.writerow(["original_name", "shapefile_name"])
+                for orig, safe in col_mapping.items():
+                    writer.writerow([orig, safe])
+
             zip_path = os.path.join(PREVIEW_DIR, f"{base_name}_shp.zip")
-            shp_base = os.path.splitext(shp_path)[0]
-            with zipfile.ZipFile(zip_path, "w") as zf:
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for suffix in [".shp", ".shx", ".dbf", ".prj", ".cpg"]:
-                    f = shp_base + suffix
-                    if os.path.exists(f):
-                        zf.write(f, os.path.basename(f))
-            export_path = zip_path
-            mime = "application/zip"
+                    fp = shp_base + suffix
+                    if os.path.exists(fp):
+                        zf.write(fp, os.path.basename(fp))
+                zf.write(mapping_path, f"{base_name}_field_names.csv")
+
+            export_path  = zip_path
+            mime         = "application/zip"
             download_name = f"{base_name}_shp.zip"
 
         elif fmt == "csv":
