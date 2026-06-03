@@ -96,6 +96,32 @@
         .log-entry.error { color: #ef5350; }
         .log-entry.success { color: #66bb6a; }
 
+        /* Upload progress circle */
+        .upload-progress-wrap {
+            display: none; flex-direction: column; align-items: center;
+            gap: 0.4rem; margin-top: 0.8rem;
+        }
+        .upload-progress-wrap svg { width: 88px; height: 88px; }
+        #uploadProgressTrack { fill: none; stroke: #eceff1; stroke-width: 9; }
+        #uploadProgressArc  {
+            fill: none; stroke: #1976d2; stroke-width: 9;
+            stroke-linecap: round;
+            stroke-dasharray: 226.2;   /* 2π × 36 */
+            stroke-dashoffset: 226.2;
+            transform: rotate(-90deg); transform-origin: 50% 50%;
+            transition: stroke-dashoffset 0.25s ease;
+        }
+        #uploadProgressArc.processing {
+            stroke: #00897b;
+            animation: spin-arc 1.4s linear infinite;
+        }
+        @keyframes spin-arc {
+            from { stroke-dashoffset: 170; transform: rotate(-90deg); }
+            to   { stroke-dashoffset: 170; transform: rotate(270deg); }
+        }
+        #uploadProgressPct  { font-size: 17px; font-weight: 700; fill: #1a1a2e; }
+        .upload-progress-label { font-size: 0.8rem; color: #607d8b; }
+
         /* Batch progress */
         .batch-progress { margin-top: 1rem; display: none; }
         .progress-bar-wrap {
@@ -379,8 +405,18 @@
                 <button class="clear-btn" id="clearBtn">{{ UI.clear_btn }}</button>
                 <input type="file" id="fileInput" multiple
                     accept=".csv,.txt,.xlsx,.geojson,.json,.shp,.gpkg,.zip,.shx,.dbf,.prj,.cpg">
-                <p class="formats">Formats : CSV, TXT, XLSX, GeoJSON, JSON, SHP, GPKG, ZIP</p>
+                <p class="formats">{{ UI.formats_single }}</p>
                 <div class="file-info" id="fileInfo"></div>
+
+                <!-- Upload progress circle -->
+                <div class="upload-progress-wrap" id="uploadProgressWrap">
+                    <svg viewBox="0 0 80 80" xmlns="http://www.w3.org/2000/svg">
+                        <circle id="uploadProgressTrack" cx="40" cy="40" r="36"/>
+                        <circle id="uploadProgressArc"   cx="40" cy="40" r="36"/>
+                        <text   id="uploadProgressPct"  x="40" y="45" text-anchor="middle">0%</text>
+                    </svg>
+                    <div class="upload-progress-label" id="uploadProgressLabel"></div>
+                </div>
             </div>
 
             <!-- Divider -->
@@ -478,20 +514,20 @@
                 </p>
                 <div id="crsOverridePanel" style="display:none; margin-top:0.75rem; padding:0.75rem 1rem; background:#f0f4f8; border-radius:6px; border:1px solid #ccd6e0;">
                     <div style="font-size:0.8rem; color:#546e7a; margin-bottom:0.5rem;">
-                        ⚠️ Map looks wrong? Override the CRS:
+                        {{ UI.crs_override_hint }}
                     </div>
                     <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
                         <span style="font-size:0.85rem; color:#37474f;">EPSG:</span>
-                        <input id="crsInput" type="number" placeholder="e.g. 27700"
+                        <input id="crsInput" type="number" placeholder="{{ UI.crs_input_placeholder }}"
                                style="width:110px; padding:0.3rem 0.5rem; border:1px solid #b0bec5; border-radius:4px; font-size:0.85rem;"/>
                         <button id="applyRemapBtn" onclick="applyRemap()"
                                 style="padding:0.3rem 0.8rem; background:#2d6a9f; color:white; border:none; border-radius:4px; font-size:0.85rem; cursor:pointer;">
-                            Apply
+                            {{ UI.crs_apply_btn }}
                         </button>
                         <span id="remapStatus" style="font-size:0.8rem; color:#e53935;"></span>
                     </div>
                     <div style="margin-top:0.4rem; font-size:0.75rem; color:#78909c;">
-                        Common codes: 4326 (WGS84) · 2154 (France) · 27700 (UK) · 25832 (Germany/Italy UTM) · 3035 (Europe) · 2062 (Spain)
+                        {{ UI.crs_common_codes }}
                     </div>
                 </div>
             </div>
@@ -585,6 +621,7 @@
         clearBtn.addEventListener('click', () => {
             fileInput.value = '';
             fileInfo.textContent = '';
+            _hideProgress();
             results.style.display = 'none';
             mapContainer.style.display = 'none';
             if (map) { map.remove(); map = null; }
@@ -671,12 +708,35 @@
             uploadFile(file, isLargeFile, sizeMB, allFiles);
         }
 
-        async function uploadFile(file, isLargeFile = false, sizeMB = 0, allFiles = null) {
+        // ── Progress circle helpers ───────────────────────────────────────
+        const _progressWrap  = document.getElementById('uploadProgressWrap');
+        const _progressArc   = document.getElementById('uploadProgressArc');
+        const _progressPct   = document.getElementById('uploadProgressPct');
+        const _progressLabel = document.getElementById('uploadProgressLabel');
+        const _CIRC = 2 * Math.PI * 36;  // circumference for r=36
+
+        function _showProgress(pct, label) {
+            _progressWrap.style.display = 'flex';
+            _progressArc.classList.remove('processing');
+            _progressArc.style.strokeDashoffset = _CIRC * (1 - pct / 100);
+            _progressPct.textContent = `${Math.round(pct)}%`;
+            _progressLabel.textContent = label || '';
+        }
+        function _showProcessing() {
+            _progressWrap.style.display = 'flex';
+            _progressArc.classList.add('processing');
+            _progressPct.textContent = '…';
+            _progressLabel.textContent = UI.progress_processing || 'Processing…';
+        }
+        function _hideProgress() {
+            _progressWrap.style.display = 'none';
+            _progressArc.classList.remove('processing');
+            _progressArc.style.strokeDashoffset = _CIRC;
+            _progressPct.textContent = '0%';
+        }
+
+        function uploadFile(file, isLargeFile = false, sizeMB = 0, allFiles = null) {
             clearLogs();
-            // if (!logsContent.classList.contains('show')) {
-            //     logsContent.classList.add('show');
-            //     logsToggle.textContent = UI.hide_logs;;
-            // }
             if (isLargeFile) {
                 status.className = 'status warning';
                 status.textContent = UI.status_large_file.replace('{size}', sizeMB.toFixed(1));
@@ -694,7 +754,6 @@
 
             const formData = new FormData();
             formData.append('file', file);
-            // Append sidecar files if present (e.g. .shx, .dbf, .prj for shapefiles)
             if (allFiles) {
                 const SIDECAR = ['.shx', '.dbf', '.prj', '.cpg', '.qpj'];
                 allFiles.forEach(f => {
@@ -703,11 +762,27 @@
                 });
             }
 
-            try {
-                addLog(UI.log_sending);
-                const resp = await fetch('/upload', { method: 'POST', body: formData });
+            _showProgress(0, UI.progress_uploading || 'Uploading…');
+            addLog(UI.log_sending);
+
+            const xhr = new XMLHttpRequest();
+
+            xhr.upload.addEventListener('progress', e => {
+                if (!e.lengthComputable) return;
+                const pct = (e.loaded / e.total) * 100;
+                _showProgress(pct, UI.progress_uploading || 'Uploading…');
+            });
+
+            xhr.upload.addEventListener('load', () => {
+                _showProcessing();
                 addLog(UI.log_receiving);
-                const data = await resp.json();
+            });
+
+            xhr.addEventListener('load', () => {
+                _hideProgress();
+                let data;
+                try { data = JSON.parse(xhr.responseText); }
+                catch { data = { error: `Server error (HTTP ${xhr.status})` }; }
 
                 if (data.error) {
                     status.className = 'status error';
@@ -756,13 +831,19 @@
                         addLog(UI.log_no_map);
                     }
                 }
-            } catch (err) {
-                status.className = 'status error';
-                status.textContent = 'Erreur de connexion : ' + err.message;
-                addLog(UI.status_conn_error.replace('{msg}', err.message), 'error');
-            } finally {
                 browseBtn.disabled = false;
-            }
+            });
+
+            xhr.addEventListener('error', () => {
+                _hideProgress();
+                status.className = 'status error';
+                status.textContent = UI.status_conn_error.replace('{msg}', 'Network error');
+                addLog(UI.log_conn_error.replace('{msg}', 'Network error'), 'error');
+                browseBtn.disabled = false;
+            });
+
+            xhr.open('POST', '/upload');
+            xhr.send(formData);
         }
 
         // ── Display helpers ───────────────────────────────────────────────
@@ -1310,7 +1391,7 @@
                     previewTableWrap.innerHTML = html;
                 }
             } catch(e) {
-                previewTableWrap.innerHTML = `<p style="color:#c62828; margin-top:0.5rem">Erreur: ${e.message}</p>`;
+                previewTableWrap.innerHTML = `<p style="color:#c62828; margin-top:0.5rem">${UI.log_error.replace('{msg}', e.message)}</p>`;
             } finally {
                 previewBtn.textContent = UI.preview_btn;
                 previewBtn.disabled = false;

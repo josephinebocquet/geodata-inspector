@@ -5,5 +5,6 @@ localisation:
   custom_reference_path: ''
 server:
   debug: false
-  host: 10.149.201.62 #localhost
+  host: localhost # 10.149.201.62
   port: 5050
+  max_upload_size_mb: null   # null = no limit; set e.g. 500 to cap at 500 MB
