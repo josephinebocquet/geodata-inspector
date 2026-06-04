@@ -18,6 +18,8 @@ python-calamine>=0.1.0  # Fast Excel reading
 chardet>=5.0.0         # Character encoding detection
 clevercsv>=0.8.0       # Smart CSV dialect detection
 pyarrow>=14.0.0        # GeoParquet export
+rasterio>=1.3.0        # Raster file reading (GeoTIFF, IMG, JP2, ASC, HGT)
+Pillow>=10.0.0         # Raster thumbnail generation
 
 # Web application
 flask>=3.0.0
