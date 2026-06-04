@@ -4,9 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ UI.page_title }}</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='geodataInspectorLOGO.svg') }}">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css" />
     <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f7fa; color: #333; }
@@ -463,6 +466,24 @@
             padding: 0.2rem 0.4rem; border: 1px solid #b0bec5;
             border-radius: 4px; font-size: 0.8rem; width: 132px;
         }
+        /* Flatpickr: first/last dataset date highlighted in orange */
+        .flatpickr-day.fp-bound {
+            box-shadow: inset 0 0 0 2px #e65100;
+            color: #e65100 !important;
+            font-weight: 700;
+        }
+        .flatpickr-day.fp-bound.selected,
+        .flatpickr-day.fp-bound.startRange,
+        .flatpickr-day.fp-bound.endRange {
+            background: #e65100 !important;
+            border-color: #e65100 !important;
+            color: #fff !important;
+        }
+        /* Make Flatpickr inputs match existing dt-date-input style */
+        .flatpickr-input { width: 132px; }
+
+        .dt-brush-overlay { cursor: crosshair; }
+        .dt-brush-sel { pointer-events: none; }
         .dt-bar-clickable, .dt-occ-clickable { cursor: pointer; }
         .dt-bar-clickable:hover { opacity: 1; stroke: #0d47a1; stroke-width: 1px; }
         .dt-occ-clickable:hover { opacity: 1; stroke: #004d40; stroke-width: 1px; }
@@ -504,7 +525,12 @@
         </select>
     </div>
     <div class="container">
-        <h1>Geodata Inspector</h1>
+        <h1 style="display:flex; align-items:center; gap:0.5rem;">
+            <img src="{{ url_for('static', filename='geodataInspectorLOGO.svg') }}"
+                 alt="Geodata Inspector logo"
+                 style="height:1.6em; width:auto; vertical-align:middle;">
+            Geodata Inspector
+        </h1>
 
         <!-- Combined upload box -->
         <div class="upload-combined" id="dropZone">
@@ -621,6 +647,9 @@
                     {{ UI.map_note }}
                 </p>
                 <div id="crsOverridePanel" style="display:none; margin-top:0.75rem; padding:0.75rem 1rem; background:#f0f4f8; border-radius:6px; border:1px solid #ccd6e0;">
+                    <div style="font-size:0.78rem; font-weight:700; color:#1a1a2e; text-transform:uppercase; letter-spacing:0.04em; margin-bottom:0.5rem;">
+                        {{ UI.crs_remap_title }}
+                    </div>
                     <div style="font-size:0.8rem; color:#546e7a; margin-bottom:0.5rem;">
                         {{ UI.crs_override_hint }}
                     </div>
@@ -693,6 +722,12 @@
                         <option value="min">{{ UI.dt_agg_min }}</option>
                         <option value="max">{{ UI.dt_agg_max }}</option>
                     </select>
+                </div>
+                <div class="dt-filter-row">
+                    <span class="dt-filter-label">{{ UI.dt_from_label }}</span>
+                    <input type="date" id="dtValFrom" class="dt-date-input">
+                    <span style="font-size:0.78rem; font-weight:600; color:#455a64;">{{ UI.dt_to_label }}</span>
+                    <input type="date" id="dtValTo" class="dt-date-input">
                     <button class="dt-apply-btn" style="margin-left:0.8rem;" onclick="applyValueDist()">{{ UI.dt_apply_btn }}</button>
                     <button class="dt-reset-btn" onclick="resetValueDist()">{{ UI.dt_reset_btn }}</button>
                 </div>
@@ -1070,7 +1105,82 @@
             return html || `<em>${UI.dt_no_data}</em>`;
         }
         
-        function renderOccupancyChart(buckets, barClass, yLabel = '', unit = '') {
+        // ── Chart brush (drag to select time range) ───────────────────────
+        const _dtCharts = {};   // {id: {buckets, n, W, PAD_L, PAD_R, PAD_T, chartW, chartH, panel}}
+        let _dtBrush = null;    // active brush drag state
+
+        function _brushId() { return 'b' + Math.random().toString(36).slice(2, 8); }
+
+        function _dtBrushStart(e, id) {
+            e.preventDefault();
+            const svg   = e.currentTarget.closest('svg');
+            const br    = svg.getBoundingClientRect();
+            const cd    = _dtCharts[id];
+            const scale = br.width / cd.W;
+            _dtBrush = { id, svg, br, scale, cd, startVX: (e.clientX - br.left) / scale };
+            document.addEventListener('mousemove', _dtBrushMove);
+            document.addEventListener('mouseup',   _dtBrushUp);
+        }
+
+        function _dtBrushMove(e) {
+            if (!_dtBrush) return;
+            const { br, scale, cd, startVX, id } = _dtBrush;
+            const curVX  = (e.clientX - br.left) / scale;
+            const x1     = Math.max(Math.min(startVX, curVX), cd.PAD_L);
+            const x2     = Math.min(Math.max(startVX, curVX), cd.PAD_L + cd.chartW);
+            const sel    = document.getElementById('bsel_' + id);
+            if (sel) { sel.setAttribute('x', x1); sel.setAttribute('width', Math.max(0, x2 - x1)); }
+        }
+
+        function _dtBrushUp(e) {
+            document.removeEventListener('mousemove', _dtBrushMove);
+            document.removeEventListener('mouseup',   _dtBrushUp);
+            if (!_dtBrush) return;
+            const { br, scale, cd, startVX, id } = _dtBrush;
+            _dtBrush = null;
+
+            const curVX = (e.clientX - br.left) / scale;
+            const x1rel = Math.max(Math.min(startVX, curVX) - cd.PAD_L, 0);
+            const x2rel = Math.min(Math.max(startVX, curVX) - cd.PAD_L, cd.chartW);
+            if (x2rel - x1rel < 5) return;   // too small → ignore
+
+            const i1 = Math.max(0,          Math.floor(x1rel / cd.chartW * cd.n));
+            const i2 = Math.min(cd.n - 1,   Math.ceil(x2rel  / cd.chartW * cd.n));
+            if (!cd.buckets[i1] || !cd.buckets[i2]) return;
+
+            const d1 = cd.buckets[i1].t.slice(0, 10);
+            const d2 = cd.buckets[i2].t.slice(0, 10);
+
+            // Clear selection rect
+            const sel = document.getElementById('bsel_' + id);
+            if (sel) { sel.setAttribute('width', '0'); }
+
+            // Apply the period to the appropriate panel via Flatpickr API
+            if (cd.panel === 'occ') {
+                _fpSetDate('dtFromDate', d1);
+                _fpSetDate('dtToDate',   d2);
+                applyOccupancy();
+            } else {
+                _fpSetDate('dtValFrom', d1);
+                _fpSetDate('dtValTo',   d2);
+                applyValueDist();
+            }
+        }
+
+        function _addBrush(svg, id, cd, panel) {
+            // Store chart metadata for coordinate mapping
+            _dtCharts[id] = { ...cd, panel };
+            return `
+                <rect class="dt-brush-overlay"
+                      x="${cd.PAD_L}" y="${cd.PAD_T}" width="${cd.chartW}" height="${cd.chartH}"
+                      fill="transparent"
+                      onmousedown="_dtBrushStart(event,'${id}')"/>
+                <rect class="dt-brush-sel" id="bsel_${id}"
+                      x="${cd.PAD_L}" y="${cd.PAD_T}" width="0" height="${cd.chartH}"
+                      fill="rgba(25,118,210,0.18)" stroke="#1976d2" stroke-width="1"/>`;
+        }
+
+        function renderOccupancyChart(buckets, barClass, yLabel = '', unit = '', panel = 'occ') {
             if (!buckets || buckets.length === 0) return '';
 
             const W = 560, H = 110, PAD_L = 36, PAD_R = 8, PAD_T = 6, PAD_B = 42;
@@ -1147,9 +1257,12 @@
                 transform="rotate(-90)" x="${-(PAD_T + chartH/2)}" y="9"
                 text-anchor="middle">${yLabel}</text>` : '';
 
+            const bid   = _brushId();
+            const brush = _addBrush(null, bid, {buckets, n, W, PAD_L, PAD_R, PAD_T, chartW, chartH}, panel);
+
             return `<div class="dt-chart-wrap">
                 <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
-                    ${yLabelSvg}${yAxis}${xLabels}${unitBadge}${bars}
+                    ${yLabelSvg}${yAxis}${xLabels}${unitBadge}${bars}${brush}
                 </svg>
             </div>`;
         }
@@ -1230,9 +1343,17 @@
             // ── Panel 2 – Value distribution: date + numeric col ──────────
             const valDateSel = document.getElementById('dtValDateSel');
             valDateSel.innerHTML = '';
+            // Individual date columns
             dateCols.forEach(col => {
                 const o = document.createElement('option');
                 o.value = col; o.textContent = col; valDateSel.appendChild(o);
+            });
+            // Interval pairs — same options as Panel 1
+            pairs.forEach(pair => {
+                const o = document.createElement('option');
+                o.value = `${pair.col_start}||${pair.col_end}`;
+                o.textContent = `${UI.dt_interval_prefix}: ${pair.col_start} → ${pair.col_end}`;
+                valDateSel.appendChild(o);
             });
 
             const valColSel = document.getElementById('dtValColSel');
@@ -1249,8 +1370,13 @@
                 if (c.global_min && (!gMin || c.global_min < gMin)) gMin = c.global_min;
                 if (c.global_max && (!gMax || c.global_max > gMax)) gMax = c.global_max;
             });
-            if (gMin) document.getElementById('dtFromDate').value = gMin.slice(0, 10);
-            if (gMax) document.getElementById('dtToDate').value   = gMax.slice(0, 10);
+            // Initialise Flatpickr on all four temporal date inputs
+            const fMin = gMin?.slice(0,10) || null;
+            const fMax = gMax?.slice(0,10) || null;
+            _initFlatpickr('dtFromDate', fMin, fMax, fMin, fMax, fMin);
+            _initFlatpickr('dtToDate',   fMin, fMax, fMin, fMax, fMax);
+            _initFlatpickr('dtValFrom',  fMin, fMax, fMin, fMax, fMin);
+            _initFlatpickr('dtValTo',    fMin, fMax, fMin, fMax, fMax);
 
             // Reset granularity
             _selectedGranularity = null;
@@ -1342,11 +1468,16 @@
 
         // ── Panel 2: Value distribution ───────────────────────────────────
         function applyValueDist() {
-            const dateCol = document.getElementById('dtValDateSel').value;
+            const dateVal = document.getElementById('dtValDateSel').value;
             const valCol  = document.getElementById('dtValColSel').value;
             const agg     = document.getElementById('dtValAggSel').value;
 
             if (!valCol) { console.warn('[Value] no column selected'); return; }
+
+            // If an interval pair is selected (e.g. "col_start||col_end"),
+            // use the start column as the X axis for the value distribution.
+            let dateCol = dateVal;
+            if (dateVal.includes('||')) dateCol = dateVal.split('||')[0];
 
             fetch('/temporal_plot', {
                 method: 'POST',
@@ -1355,8 +1486,8 @@
                     date_col:    dateCol,
                     value_col:   valCol,
                     aggregation: agg,
-                    date_start:  document.getElementById('dtFromDate').value || null,
-                    date_end:    document.getElementById('dtToDate').value   || null,
+                    date_start:  document.getElementById('dtValFrom').value || document.getElementById('dtFromDate').value || null,
+                    date_end:    document.getElementById('dtValTo').value   || document.getElementById('dtToDate').value   || null,
                     granularity: _selectedGranularity,
                 })
             })
@@ -1370,7 +1501,7 @@
                 let html = `<div class="dt-section">`;
                 html += `<div class="dt-label">${title}</div>`;
                 if (minD && maxD) html += `<div class="dt-meta">${UI.dt_coverage} : ${minD} → ${maxD}</div>`;
-                html += renderOccupancyChart(data.buckets, 'dt-value-bar', UI.dt_y_label_value, unit);
+                html += renderOccupancyChart(data.buckets, 'dt-value-bar', UI.dt_y_label_value, unit, 'val');
                 html += `</div>`;
                 document.getElementById('dtValContent').innerHTML = html;
             })
@@ -1382,7 +1513,7 @@
         }
 
         // ── Step-area chart (true occupancy curve) ────────────────────────
-        function renderStepAreaChart(buckets, yLabel, unit) {
+        function renderStepAreaChart(buckets, yLabel, unit, panel = 'occ') {
             if (!buckets || buckets.length === 0) return '';
             const W = 560, H = 120, PL = 40, PR = 8, PT = 6, PB = 42;
             const cW = W - PL - PR, cH = H - PT - PB;
@@ -1445,6 +1576,7 @@
                     <path d="${area}" fill="#00897b" opacity="0.2"/>
                     <path d="${line}" fill="none" stroke="#00897b" stroke-width="2"/>
                     ${hovers}
+                    ${_addBrush(null, _brushId(), {buckets, n, W:W, PAD_L:PL, PAD_R:PR, PAD_T:PT, chartW:cW, chartH:cH}, panel)}
                 </svg>
             </div>`;
         }
@@ -1469,8 +1601,8 @@
                 start = isoDate.slice(0, 10);
                 end   = isoDate.slice(0, 10);
             }
-            document.getElementById('dtFromDate').value = start;
-            document.getElementById('dtToDate').value   = end;
+            _fpSetDate('dtFromDate', start);
+            _fpSetDate('dtToDate',   end);
             applyTemporalFilter();
         }
 
@@ -1809,6 +1941,43 @@
             }
         }
         // Tracks whether the current file on the map is a raster
+        // ── Flatpickr enhanced date pickers ──────────────────────────────
+        const _fpInstances = {};
+
+        function _initFlatpickr(inputId, minDate, maxDate, firstDate, lastDate, defaultDate) {
+            if (!window.flatpickr) return;
+            if (_fpInstances[inputId]) { _fpInstances[inputId].destroy(); delete _fpInstances[inputId]; }
+            const el = document.getElementById(inputId);
+            if (!el) return;
+            _fpInstances[inputId] = flatpickr(el, {
+                dateFormat:  'Y-m-d',
+                minDate:     minDate  || null,
+                maxDate:     maxDate  || null,
+                defaultDate: defaultDate || el.value || null,
+                allowInput:  true,
+                onDayCreate(dObj, dStr, fp, day) {
+                    const d = day.dateObj;
+                    const iso = d.getFullYear() + '-' +
+                                String(d.getMonth() + 1).padStart(2, '0') + '-' +
+                                String(d.getDate()).padStart(2, '0');
+                    if (iso === firstDate) {
+                        day.classList.add('fp-bound');
+                        day.title = UI.fp_first_date || 'Première date du jeu de données';
+                    }
+                    if (iso === lastDate) {
+                        day.classList.add('fp-bound');
+                        day.title = UI.fp_last_date || 'Dernière date du jeu de données';
+                    }
+                }
+            });
+        }
+
+        // Set date via Flatpickr API (falls back to .value for non-wrapped inputs)
+        function _fpSetDate(inputId, dateStr) {
+            if (_fpInstances[inputId]) _fpInstances[inputId].setDate(dateStr, true);
+            else { const el = document.getElementById(inputId); if (el) el.value = dateStr; }
+        }
+
         let _currentMapIsRaster = false;
         let _currentMapData     = null;   // last mapData passed to displayMap()
 
@@ -2426,12 +2595,10 @@
         if (!di) return;
         const sel = document.getElementById('expTimeCol');
         sel.innerHTML = (di.all_columns || [di.column]).map(c => `<option>${c}</option>`).join('');
-        document.getElementById('expTimeFrom').value = di.global_min || '';
-        document.getElementById('expTimeTo').value   = di.global_max || '';
-        document.getElementById('expTimeFrom').min   = di.global_min || '';
-        document.getElementById('expTimeFrom').max   = di.global_max || '';
-        document.getElementById('expTimeTo').min     = di.global_min || '';
-        document.getElementById('expTimeTo').max     = di.global_max || '';
+        const fMin = (di.global_min || '').slice(0,10) || null;
+        const fMax = (di.global_max || '').slice(0,10) || null;
+        _initFlatpickr('expTimeFrom', fMin, fMax, fMin, fMax, fMin);
+        _initFlatpickr('expTimeTo',   fMin, fMax, fMin, fMax, fMax);
     }
 
     // ── Spatial filter & mini-map ─────────────────────────────────────────
