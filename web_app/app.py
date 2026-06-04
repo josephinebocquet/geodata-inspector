@@ -1,5 +1,15 @@
 import os
 import sys
+
+# ── PROJ database conflict fix ────────────────────────────────────────────────
+# PostgreSQL/PostGIS installs its own (old) PROJ database which shadows the
+# conda env's PROJ. Force the correct path before any pyproj/rasterio import.
+_PROJ_CONDA = os.path.join(sys.prefix, "Library", "share", "proj")
+if os.path.isdir(_PROJ_CONDA):
+    os.environ["PROJ_DATA"] = _PROJ_CONDA
+    os.environ["PROJ_LIB"]  = _PROJ_CONDA
+# ─────────────────────────────────────────────────────────────────────────────
+
 import tempfile
 import shutil
 import zipfile
@@ -69,12 +79,36 @@ batch_state = {
     "output_path": None,
     "tmpdir": None,
     "gdfs": {},
+    "raster_maps": {},       # {filename: map_data} for raster files
     "stop_requested": False,
 
 }
 batch_executor = ThreadPoolExecutor(max_workers=1)
 
-ALLOWED_EXTENSIONS = {".csv", ".txt", ".xlsx", ".geojson", ".json", ".shp", ".gpkg", ".zip"}
+VECTOR_EXTENSIONS = {".csv", ".txt", ".xlsx", ".geojson", ".json", ".shp", ".gpkg", ".zip"}
+RASTER_EXTENSIONS = {".tif", ".tiff", ".img", ".jp2", ".asc", ".hgt", ".nc"}
+ALLOWED_EXTENSIONS = VECTOR_EXTENSIONS | RASTER_EXTENSIONS
+
+
+def _check_raster_write_drivers():
+    """Return {fmt_key: available} for raster write formats, checked at startup."""
+    import rasterio
+    try:
+        ext_to_driver = rasterio.drivers.raster_driver_extensions()
+    except Exception:
+        ext_to_driver = {}
+    candidates = {
+        "tif":  "GTiff",
+        "nc":   "netCDF",
+        "jp2":  "JP2OpenJPEG",
+        "img":  "HFA",
+        "asc":  "AAIGrid",
+    }
+    return {k: (v in ext_to_driver.values() or k == "tif")
+            for k, v in candidates.items()}
+
+
+RASTER_WRITE_DRIVERS = _check_raster_write_drivers()
 
 # Define the desired column order for the summary display
 COLUMN_ORDER = [
@@ -106,6 +140,23 @@ COLUMN_ORDER = [
     "Taux de remplissage (%)",
     "Complexite moyenne",
     "Geometries dupliquees (%)",
+    "Couverture territoriale (%)",
+]
+
+RASTER_COLUMN_ORDER = [
+    "Nom du fichier",
+    "Taille (Ko)",
+    "Date de création du fichier (Y-M-D)",
+    "Type de fichier",
+    "CRS",
+    "Nb bandes",
+    "Nb colonnes (pixels)",
+    "Nb lignes (pixels)",
+    "Bandes",
+    "Résolution des cellules (m)",
+    "Étendue (WGS84)",
+    "Emprise estimée (km2)",
+    "Taux de remplissage (%)",
     "Couverture territoriale (%)",
 ]
 
@@ -268,17 +319,19 @@ def _extract_map_data():
         if gdf.crs is None:
             return None
 
-        # OPTIMIZATION: Sample FIRST, then reproject only the sample
+        # Bounds must come from the FULL GeoDataFrame, not the sample.
+        # For time-series data a sample may contain only one unique location
+        # (e.g. a single monitoring station), making bounds collapse to a point.
+        gdf_wgs84_full = gdf.to_crs(epsg=4326)
+        bounds = gdf_wgs84_full.total_bounds  # [minx, miny, maxx, maxy]
+
+        # Sample only for GeoJSON (keeps response size small)
         sample_size = min(1000, len(gdf))
-        gdf_sample = gdf.sample(n=sample_size, random_state=42) if len(gdf) > sample_size else gdf.copy()
+        gdf_sample_wgs84 = (gdf_wgs84_full.sample(n=sample_size, random_state=42)
+                            if len(gdf_wgs84_full) > sample_size
+                            else gdf_wgs84_full.copy())
 
-        # Convert only the sample to WGS84 for web mapping
-        gdf_sample_wgs84 = gdf_sample.to_crs(epsg=4326)
-
-        # Get bounding box from sample (good enough approximation)
-        bounds = gdf_sample_wgs84.total_bounds  # [minx, miny, maxx, maxy]
-
-        # Calculate center
+        # Calculate center from full extent
         center = [(bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2]  # [lat, lon]
 
         # Convert datetime/timestamp columns to strings for JSON serialization
@@ -330,6 +383,81 @@ def set_language(lang):
         return jsonify({"ok": False, "error": str(e)}), 500
         
     
+def _inspect_any_file_for_batch(filepath):
+    """
+    Inspect a single file (raster or vector) for batch processing.
+
+    Returns (summary_dict, map_data) where:
+      - summary_dict : flat/nested dict of metadata (nested values kept as dicts
+                       so the batch result viewer can render them as tables)
+      - map_data     : raster map dict {type, bounds, thumbnail} or None
+    Returns (None, None) on failure.
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in RASTER_EXTENSIONS:
+        from geodata_inspector.raster import inspect_raster
+        result = inspect_raster(filepath, gdf_reference=gdf_reference,
+                                metric_crs=METRIC_CRS, wgs84_bounds=WGS84_BOUNDS,
+                                inferred_label=UI.get("crs_inferred", "inferred"))
+        summary = result["summary"]
+        flat = {k: v for k, v in summary.items() if not k.startswith("_")}
+        return flat, result["map"]
+    else:
+        # Vector / tabular path
+        if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
+            inspector.summary_rows.clear()
+        inspector.last_gdf = None
+        log_capture = StringIO()
+        with redirect_stdout(log_capture):
+            inspector.inspect_file(filepath, gdf_reference,
+                                   geo_key_patterns=GEO_KEY_PATTERNS,
+                                   wgs84_bounds=WGS84_BOUNDS,
+                                   metric_crs=METRIC_CRS)
+        if inspector.summary_rows:
+            return dict(inspector.summary_rows[-1]), None
+        return None, None
+
+
+def _handle_raster_upload(filepath, original_filename):
+    """Inspect a raster file and return a JSON response compatible with the upload endpoint."""
+    from geodata_inspector.raster import inspect_raster
+
+    try:
+        result = inspect_raster(
+            filepath,
+            gdf_reference=gdf_reference,
+            metric_crs=METRIC_CRS,
+            wgs84_bounds=WGS84_BOUNDS,
+            inferred_label=UI.get("crs_inferred", "inferred"),
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": f"Raster inspection failed: {exc}"}), 500
+
+    summary_raw = result["summary"]
+    summary_raw["Nom du fichier"] = original_filename
+
+    # Order keys according to RASTER_COLUMN_ORDER
+    ordered = []
+    raw_copy = dict(summary_raw)
+    for key in RASTER_COLUMN_ORDER:
+        if key in raw_copy:
+            ordered.append([key, raw_copy.pop(key)])
+    for key, val in raw_copy.items():
+        if not key.startswith("_"):   # skip internal flags
+            ordered.append([key, val])
+
+    return jsonify({
+        "summary":  _make_serializable(ordered),
+        "datetime": None,
+        "map":      _make_serializable(result["map"]),
+        "logs":     [],
+        "glossary": {},
+        "glossary_translated": {},
+        "raster":   True,
+    })
+
+
 @app.route("/upload", methods=["POST"])
 def upload():
     if "file" not in request.files:
@@ -374,8 +502,13 @@ def upload():
             filepath_to_inspect = _handle_zip(saved_path, tmpdir)
             if filepath_to_inspect is None:
                 return jsonify({
-                    "error": "ZIP archive does not contain a supported data file (.shp, .geojson, .csv, .xlsx, .gpkg)."
+                    "error": "ZIP archive does not contain a supported data file (CSV, XLSX, GeoJSON, SHP, GPKG, GeoTIFF, NC…)."
                 }), 400
+
+        # ── Branch: raster vs vector/tabular ─────────────────────────────
+        actual_ext = os.path.splitext(filepath_to_inspect)[1].lower()
+        if actual_ext in RASTER_EXTENSIONS:
+            return _handle_raster_upload(filepath_to_inspect, file.filename)
 
         if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
             inspector.summary_rows.clear()
@@ -460,9 +593,10 @@ def _handle_zip(zip_path, extract_dir):
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(extract_dir)
 
-    GEO_EXTS   = {".shp", ".gpkg", ".geojson", ".json"}
-    TABLE_EXTS = {".csv", ".txt", ".xlsx"}
-    ALL_EXTS   = GEO_EXTS | TABLE_EXTS
+    GEO_EXTS    = {".shp", ".gpkg", ".geojson", ".json"}
+    TABLE_EXTS  = {".csv", ".txt", ".xlsx"}
+    RSTR_EXTS   = RASTER_EXTENSIONS          # {".tif", ".tiff", ".img", ".jp2", ".asc", ".hgt", ".nc"}
+    ALL_EXTS    = GEO_EXTS | TABLE_EXTS | RSTR_EXTS
 
     candidates = []
     for root, _, files in os.walk(extract_dir):
@@ -481,8 +615,8 @@ def _handle_zip(zip_path, extract_dir):
     if len(candidates) == 1:
         return candidates[0][2]
 
-    # Multiple files → check if there is one dominant geospatial file
-    geo_files = [c for c in candidates if c[0] in GEO_EXTS]
+    # Multiple files → check if there is one dominant geospatial / raster file
+    geo_files = [c for c in candidates if c[0] in GEO_EXTS | RSTR_EXTS]
     if len(geo_files) == 1:
         return geo_files[0][2]
 
@@ -526,6 +660,58 @@ def preview():
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
         
+@app.route("/preview_filtered", methods=["POST"])
+def preview_filtered():
+    """
+    Return up to 10 rows of the current vector file after applying a spatial filter.
+    Same response format as /preview, plus total_filtered and total_before counts.
+    """
+    path = last_preview_path.get("path")
+    ext  = last_preview_path.get("ext", "")
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "No file available for preview."}), 404
+    if ext.lower() in RASTER_EXTENSIONS:
+        return jsonify({"error": "Spatial filter not available for raster files."}), 400
+
+    body           = request.get_json(silent=True) or {}
+    spatial_filter = body.get("spatial_filter")
+
+    try:
+        gdf = _read_full_gdf(path, ext)
+        if gdf is None:
+            return jsonify({"error": "Could not read file."}), 500
+
+        total_before   = len(gdf)
+        total_filtered = total_before
+
+        if spatial_filter and hasattr(gdf, "crs") and gdf.crs is not None:
+            geom_wgs84 = _build_filter_geom_wgs84(spatial_filter)
+            if geom_wgs84:
+                ref_proj = gpd.GeoDataFrame(geometry=[geom_wgs84], crs="EPSG:4326").to_crs(gdf.crs)
+                try:
+                    mask = gdf.geometry.intersects(ref_proj.geometry.iloc[0])
+                    gdf  = gdf[mask.fillna(False)]
+                except Exception:
+                    pass
+            total_filtered = len(gdf)
+
+        geo_col = gdf.geometry.name if hasattr(gdf, "geometry") and gdf.geometry is not None else None
+        df = pd.DataFrame(gdf.head(10).drop(columns=[geo_col], errors="ignore") if geo_col else gdf.head(10))
+        df = df.where(pd.notnull(df), None)
+        df.columns = [str(c) for c in df.columns]
+
+        return jsonify({
+            "columns":        df.columns.tolist(),
+            "rows":           _make_serializable(df.values.tolist()),
+            "total_filtered": total_filtered,
+            "total_before":   total_before,
+        })
+
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/batch", methods=["POST"])
 def batch_upload():
     """Accept a directory zip or multiple files and process them all."""
@@ -565,8 +751,8 @@ def batch_upload():
 
     data_dir = result[4:]  # strip "DIR:" prefix
 
-    # Collect all files
-    ALL_EXTS = {".csv", ".txt", ".xlsx", ".geojson", ".json", ".shp", ".gpkg"}
+    # Collect all files (vector + raster)
+    ALL_EXTS = VECTOR_EXTENSIONS | RASTER_EXTENSIONS
     files_to_process = []
     for root, _, files_in_dir in os.walk(data_dir):
         for fname in sorted(files_in_dir):
@@ -577,7 +763,7 @@ def batch_upload():
 
     if not files_to_process:
         shutil.rmtree(tmpdir, ignore_errors=True)
-        return jsonify({"error": "No supported files found in the ZIP."}), 400
+        return jsonify({"error": "No supported files found in the ZIP (CSV, XLSX, GeoJSON, SHP, GPKG, GeoTIFF, NC…)."}), 400
 
     # Reset batch state
     batch_state.update({
@@ -590,6 +776,7 @@ def batch_upload():
         "output_path": None,
         "tmpdir": tmpdir,
         "gdfs": {},
+        "raster_maps": {},
         "stop_requested": False,
 
     })
@@ -606,28 +793,15 @@ def batch_upload():
                     break
                 batch_state["current"] = os.path.basename(filepath)
                 try:
-                    if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
-                        inspector.summary_rows.clear()
-                    inspector.last_gdf = None
-                    log_capture = StringIO()
-                    with redirect_stdout(log_capture):
-                        inspector.inspect_file(filepath_to_inspect, gdf_reference,
-                                                geo_key_patterns=GEO_KEY_PATTERNS,
-                                                wgs84_bounds=WGS84_BOUNDS,
-                                                metric_crs=METRIC_CRS)
-                    captured = log_capture.getvalue()
-                    if captured:
-                        for line in captured.splitlines():
-                            if line.strip():
-                                batch_state["logs"].append(f"[{os.path.basename(filepath)}] {line}")
-                    if inspector.summary_rows:
-                        row_dict = dict(inspector.summary_rows[-1])
-                        row_dict["_tmpname"] = os.path.basename(filepath)
-                        if inspector.last_gdf is not None:
-                            batch_state["gdfs"][os.path.basename(filepath)] = inspector.last_gdf.copy()
+                    row_dict, raster_map = _inspect_any_file_for_batch(filepath)
+                    if row_dict:
+                        fname = os.path.basename(filepath)
+                        row_dict["_tmpname"] = fname
+                        if raster_map:
+                            batch_state["raster_maps"][fname] = raster_map
+                        elif getattr(inspector, 'last_gdf', None) is not None:
+                            batch_state["gdfs"][fname] = inspector.last_gdf.copy()
                         all_rows.append(_translate_row_dict(row_dict, RESULT_TRANSLATIONS))
-                        
-                        # Write CSV immediately after each file
                         df_out = pd.DataFrame(all_rows)
                         for col in df_out.columns:
                             if df_out[col].dtype == object:
@@ -709,13 +883,16 @@ def batch_result(index):
 
         row = df.iloc[index].to_dict()
 
-        # Parse JSON strings back to objects
-        for k, v in row.items():
-            if isinstance(v, str) and v.strip().startswith('{'):
-                try:
-                    row[k] = json.loads(v)
-                except Exception:
-                    pass
+        # Parse JSON strings back to objects (dicts and lists)
+        for k in list(row.keys()):
+            v = row[k]
+            if isinstance(v, str):
+                s = v.strip()
+                if s.startswith(('{', '[')):
+                    try:
+                        row[k] = json.loads(s)
+                    except Exception:
+                        pass
 
         ordered = _translate_values(
             _translate_columns_detail(
@@ -728,30 +905,35 @@ def batch_result(index):
         filename_key = RESULT_TRANSLATIONS.get("Nom du fichier", "Nom du fichier")
         display_filename = row.get(filename_key, row.get("Nom du fichier", f"File {index+1}"))
 
-        stored_gdf = batch_state.get("gdfs", {}).get(tmpname)
-        if stored_gdf is not None and not stored_gdf.empty:
-            try:
-                inspector.last_gdf = stored_gdf
-                map_data = _extract_map_data()
-            except Exception:
-                traceback.print_exc()
-            finally:
-                inspector.last_gdf = None
+        # Raster map takes priority (thumbnail + extent); fall back to vector GDF
+        raster_map = batch_state.get("raster_maps", {}).get(tmpname)
+        if raster_map:
+            map_data = raster_map
+        else:
+            stored_gdf = batch_state.get("gdfs", {}).get(tmpname)
+            if stored_gdf is not None and not stored_gdf.empty:
+                try:
+                    inspector.last_gdf = stored_gdf
+                    map_data = _extract_map_data()
+                except Exception:
+                    traceback.print_exc()
+                finally:
+                    inspector.last_gdf = None
 
         # Extract datetime analysis out of summary for separate rendering
         dt_analysis = None
-        ordered_result_clean = []
-        for k, v in ordered_result:
+        ordered_clean = []
+        for k, v in ordered:
             if k == "Analyse temporelle":
                 dt_analysis = v
             else:
-                ordered_result_clean.append([k, v])
-            
+                ordered_clean.append([k, v])
+
         return jsonify({
             "index": index,
             "total": len(df),
             "filename": display_filename,
-            "summary": _make_serializable(ordered),
+            "summary": _make_serializable(ordered_clean),
             "datetime": _make_serializable(dt_analysis) if dt_analysis else None,
             "map": map_data,
             "glossary": UI.get("glossary", {}),
@@ -774,7 +956,7 @@ def batch_dir():
     if batch_state["running"]:
         return jsonify({"error": "A batch job is already running."}), 409
 
-    PRIMARY_EXTS = {".csv", ".txt", ".xlsx", ".geojson", ".json", ".shp", ".gpkg", ".zip"}
+    PRIMARY_EXTS = VECTOR_EXTENSIONS | RASTER_EXTENSIONS   # all supported data files
     SIDECAR_EXTS = {".shx", ".dbf", ".prj", ".cpg", ".qpj"}
 
     # Clean up previous batch tmpdir if it exists
@@ -818,6 +1000,7 @@ def batch_dir():
         "output_path": None,
         "tmpdir": tmpdir,
         "gdfs": {},
+        "raster_maps": {},
         "stop_requested": False,
     })
     batch_state["file_paths"] = {os.path.basename(f): f for f in saved_paths}
@@ -832,31 +1015,15 @@ def batch_dir():
                     break
                 batch_state["current"] = os.path.basename(filepath)
                 try:
-                    if hasattr(inspector, 'summary_rows') and inspector.summary_rows:
-                        inspector.summary_rows.clear()
-                    inspector.last_gdf = None
-                    log_capture = StringIO()
-                    with redirect_stdout(log_capture):
-                        inspector.inspect_file(filepath_to_inspect, gdf_reference,
-                                                geo_key_patterns=GEO_KEY_PATTERNS,
-                                                wgs84_bounds=WGS84_BOUNDS,
-                                                metric_crs=METRIC_CRS)
-
-                    captured = log_capture.getvalue()
-                    if captured:
-                        for line in captured.splitlines():
-                            if line.strip():
-                                batch_state["logs"].append(
-                                    f"[{os.path.basename(filepath)}] {line}")
-                                
-                    if inspector.summary_rows:
-                        row_dict = dict(inspector.summary_rows[-1])
-                        row_dict["_tmpname"] = os.path.basename(filepath)
-                        if inspector.last_gdf is not None:
-                            batch_state["gdfs"][os.path.basename(filepath)] = inspector.last_gdf.copy()
+                    row_dict, raster_map = _inspect_any_file_for_batch(filepath)
+                    if row_dict:
+                        fname = os.path.basename(filepath)
+                        row_dict["_tmpname"] = fname
+                        if raster_map:
+                            batch_state["raster_maps"][fname] = raster_map
+                        elif getattr(inspector, 'last_gdf', None) is not None:
+                            batch_state["gdfs"][fname] = inspector.last_gdf.copy()
                         all_rows.append(_translate_row_dict(row_dict, RESULT_TRANSLATIONS))
-                        
-                        # Write CSV immediately after each file
                         df_out = pd.DataFrame(all_rows)
                         for col in df_out.columns:
                             if df_out[col].dtype == object:
@@ -983,6 +1150,385 @@ def temporal_filter():
         return jsonify({"error": "Re-computation failed (no cached data)."}), 500
 
     return jsonify(_make_serializable(result))
+
+
+@app.route("/export_info", methods=["GET"])
+def export_info():
+    """Return available export formats, column/band list, and date range for the current file."""
+    path = last_preview_path.get("path")
+    ext  = last_preview_path.get("ext", "")
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "No file loaded."}), 404
+
+    is_raster  = ext.lower() in RASTER_EXTENSIONS
+    has_geometry = inspector.last_gdf is not None if not is_raster else False
+
+    # ── Format availability ───────────────────────────────────────────────
+    vector_fmts = {
+        "geojson":     {"available": not is_raster and has_geometry, "label": "GeoJSON",       "ext": ".geojson"},
+        "gpkg":        {"available": not is_raster and has_geometry, "label": "GeoPackage",     "ext": ".gpkg"},
+        "shp":         {"available": not is_raster and has_geometry, "label": "Shapefile (.zip)","ext": ".zip"},
+        "geoparquet":  {"available": not is_raster and has_geometry, "label": "GeoParquet",     "ext": ".parquet"},
+        "csv":         {"available": not is_raster,                  "label": "CSV + WKT",      "ext": ".csv"},
+    }
+    raster_fmts = {k: {"available": is_raster and v, "label": lbl, "ext": e}
+                   for (k, v), lbl, e in zip(
+                       RASTER_WRITE_DRIVERS.items(),
+                       ["GeoTIFF", "NetCDF", "JPEG2000", "ERDAS Imagine", "ASCII Grid"],
+                       [".tif", ".nc", ".jp2", ".img", ".asc"]
+                   )}
+
+    # ── Column / band list ────────────────────────────────────────────────
+    columns, bands = [], []
+    if is_raster:
+        # Get band names from last inspection summary
+        if inspector.summary_rows:
+            last = inspector.summary_rows[-1]
+            bandes = last.get("Bandes", {})
+            if isinstance(bandes, dict) and "data" in bandes:
+                bands = [{"index": i + 1, "name": b.get("Bande", f"Band {i+1}")}
+                         for i, b in enumerate(bandes["data"])]
+        if not bands:
+            bands = [{"index": 1, "name": "Band 1"}]
+    else:
+        # Priority 1: all_columns from last_dt_raw — populated during every DuckDB inspection
+        # and contains ALL columns from the original file schema (not just geometry columns).
+        if inspector.last_dt_raw and inspector.last_dt_raw.get("all_columns"):
+            columns = [c["name"] for c in inspector.last_dt_raw["all_columns"]]
+        # Priority 2: Colonnes table from summary_rows (French or English key)
+        elif inspector.summary_rows:
+            last     = inspector.summary_rows[-1]
+            col_raw  = last.get("Colonnes", {})
+            if isinstance(col_raw, dict) and "data" in col_raw:
+                data = col_raw["data"]
+                if data:
+                    name_key = list(data[0].keys())[0]   # first key = column name
+                    columns  = [row.get(name_key, "") for row in data if row.get(name_key)]
+        # Priority 3: GeoDataFrame columns (may be incomplete for lat/lon CSVs)
+        elif inspector.last_gdf is not None:
+            columns = [c for c in inspector.last_gdf.columns if c != "geometry"]
+
+    # ── Date range (for temporal filter) ─────────────────────────────────
+    date_info = None
+    if not is_raster and inspector.last_dt_raw:
+        all_date_cols = inspector.last_dt_raw.get("all_date_cols", [])
+        singles       = inspector.last_dt_raw.get("singles", {})
+        if all_date_cols:
+            # Global min/max across all detected date columns
+            g_min, g_max = None, None
+            for raw in singles.values():
+                d_min = raw.get("global_min", "")[:10]
+                d_max = raw.get("global_max", "")[:10]
+                if d_min and (g_min is None or d_min < g_min): g_min = d_min
+                if d_max and (g_max is None or d_max > g_max): g_max = d_max
+            date_info = {
+                "column":      all_date_cols[0],
+                "global_min":  g_min or "",
+                "global_max":  g_max or "",
+                "all_columns": all_date_cols,
+            }
+
+    return jsonify({
+        "is_raster":   is_raster,
+        "has_geometry": has_geometry,
+        "formats": {**vector_fmts, **raster_fmts},
+        "columns":     columns,
+        "bands":       bands,
+        "date_info":   date_info,
+    })
+
+
+# ── Helpers for /export_filtered ─────────────────────────────────────────
+
+def _utm_epsg(lat, lon):
+    zone = int((lon + 180) / 6) + 1
+    return 32600 + zone if lat >= 0 else 32700 + zone
+
+
+def _build_filter_geom_wgs84(spatial_filter):
+    """Return a Shapely geometry in WGS84 from a spatial filter spec."""
+    from shapely.geometry import Point, shape
+    from shapely.ops import transform as shp_transform
+    import pyproj
+
+    sf_type = spatial_filter.get("type")
+    if sf_type == "buffer":
+        lat, lon = spatial_filter["lat"], spatial_filter["lon"]
+        radius_m = float(spatial_filter.get("radius_km", 1)) * 1000
+        utm = _utm_epsg(lat, lon)
+        fwd = pyproj.Transformer.from_crs("EPSG:4326", f"EPSG:{utm}", always_xy=True).transform
+        inv = pyproj.Transformer.from_crs(f"EPSG:{utm}", "EPSG:4326", always_xy=True).transform
+        center_m = shp_transform(fwd, Point(lon, lat))
+        return shp_transform(inv, center_m.buffer(radius_m))
+    elif sf_type == "polygon":
+        return shape(spatial_filter["geojson"])
+    return None
+
+
+def _read_full_gdf(path, ext):
+    """
+    Re-read the full dataset as a GeoDataFrame for export.
+    Does not call internal inspection helpers — reads the file directly.
+    """
+    try:
+        # ── Native geo formats ────────────────────────────────────────────
+        if ext in (".geojson", ".json", ".shp", ".gpkg"):
+            return gpd.read_file(path)
+
+        # ── Tabular formats ───────────────────────────────────────────────
+        if ext == ".xlsx":
+            df = pd.read_excel(path)
+        elif ext in (".csv", ".txt"):
+            # Detect encoding
+            with open(path, "rb") as _f:
+                raw = _f.read(8192)
+            try:
+                import chardet as _cd
+                enc = _cd.detect(raw).get("encoding") or "utf-8"
+            except Exception:
+                enc = "utf-8"
+            # Detect separator
+            try:
+                first = raw.decode(enc, errors="replace")
+            except Exception:
+                first = raw.decode("utf-8", errors="replace")
+            sep = ";" if first.count(";") > first.count(",") else ","
+            df = pd.read_csv(path, sep=sep, encoding=enc, encoding_errors="replace")
+        else:
+            return None
+
+        # ── Reconstruct geometry from lat/lon if detected during inspection ─
+        src_crs = None
+        if inspector.last_gdf is not None and inspector.last_gdf.crs is not None:
+            src_crs = inspector.last_gdf.crs
+
+        _LAT = {"latitude", "lat", "y", "ylat", "ycoord", "y_coord", "y_wgs84"}
+        _LON = {"longitude", "lon", "lng", "x", "xlon", "xcoord", "x_coord", "x_wgs84"}
+
+        lat_col = next((c for c in df.columns if c.strip().lower() in _LAT), None)
+        lon_col = next((c for c in df.columns if c.strip().lower() in _LON), None)
+
+        if lat_col and lon_col:
+            lats = pd.to_numeric(df[lat_col], errors="coerce")
+            lons = pd.to_numeric(df[lon_col], errors="coerce")
+            geometry = gpd.points_from_xy(lons, lats)
+            return gpd.GeoDataFrame(df, geometry=geometry,
+                                    crs=src_crs or "EPSG:4326")
+
+        # No geometry found — return plain GeoDataFrame (CSV export still works)
+        return gpd.GeoDataFrame(df)
+
+    except Exception as exc:
+        print(f"[Export] _read_full_gdf failed: {exc}")
+        traceback.print_exc()
+        return None
+
+
+@app.route("/export_filtered", methods=["POST"])
+def export_filtered():
+    """
+    Export the current file with optional filters and format conversion.
+
+    JSON body:
+      format        : export format key (geojson, gpkg, shp, geoparquet, csv, tif, nc, jp2, img, asc)
+      columns       : list of column names to include (null = all)  — vector only
+      bands         : list of band indices [1-based] to include     — raster only
+      value_filters : [{column, value}]
+      time_filter   : {column, date_start, date_end} or null
+      spatial_filter: {type:"buffer", lat, lon, radius_km} or
+                      {type:"polygon", geojson:<GeoJSON geometry>} or null
+    """
+    import csv as _csv
+
+    path = last_preview_path.get("path")
+    ext  = last_preview_path.get("ext", "")
+    if not path or not os.path.exists(path):
+        return jsonify({"error": "No file loaded."}), 404
+
+    body         = request.get_json(silent=True) or {}
+    fmt          = body.get("format", "geojson").lower()
+    columns      = body.get("columns")      or None
+    bands        = body.get("bands")        or None
+    val_filters  = body.get("value_filters") or []
+    time_filter  = body.get("time_filter")  or None
+    spatial_filt = body.get("spatial_filter") or None
+
+    is_raster = ext.lower() in RASTER_EXTENSIONS
+
+    import re as _re
+    orig_stem   = last_preview_path.get("original_stem") or \
+                  os.path.splitext(os.path.basename(path))[0]
+    clean_stem  = _clean_download_stem(orig_stem)
+    safe_slug   = _re.sub(r"[^\w]", "_", clean_stem).strip("_") or "export"
+
+    try:
+        # ── RASTER EXPORT ─────────────────────────────────────────────────
+        if is_raster:
+            import rasterio
+            from geodata_inspector.raster import _resolve_open_path
+
+            driver_map = {"tif": "GTiff", "nc": "netCDF",
+                          "jp2": "JP2OpenJPEG", "img": "HFA", "asc": "AAIGrid"}
+            ext_map    = {"tif": ".tif", "nc": ".nc",
+                          "jp2": ".jp2", "img": ".img", "asc": ".asc"}
+            driver     = driver_map.get(fmt, "GTiff")
+            out_ext    = ext_map.get(fmt, ".tif")
+            export_path = os.path.join(PREVIEW_DIR, f"{safe_slug}_export{out_ext}")
+
+            open_path, _ = _resolve_open_path(path)
+            with rasterio.open(open_path) as src:
+                band_list = bands if bands else list(range(1, src.count + 1))
+                band_list = [b for b in band_list if 1 <= b <= src.count]
+
+                out_meta = src.meta.copy()
+                out_meta.update({"driver": driver, "count": len(band_list)})
+
+                if spatial_filt:
+                    from rasterio.mask import mask as rio_mask
+                    from shapely.geometry import mapping
+                    from shapely.ops import transform as shp_transform
+                    import pyproj
+
+                    geom_wgs84 = _build_filter_geom_wgs84(spatial_filt)
+                    if geom_wgs84 and src.crs:
+                        inv = pyproj.Transformer.from_crs(
+                            "EPSG:4326", src.crs.to_epsg() or "EPSG:4326",
+                            always_xy=True).transform
+                        geom_proj = shp_transform(inv, geom_wgs84)
+                        out_img, out_tf = rio_mask(src, [mapping(geom_proj)],
+                                                   crop=True, indexes=band_list)
+                        out_meta.update({"height": out_img.shape[1],
+                                         "width":  out_img.shape[2],
+                                         "transform": out_tf})
+                    else:
+                        out_img = src.read(band_list)
+                else:
+                    out_img = src.read(band_list)
+
+                with rasterio.open(export_path, "w", **out_meta) as dst:
+                    dst.write(out_img)
+
+            ext_label = out_ext.lstrip(".")
+            mime      = "application/octet-stream"
+            dl_name   = f"{clean_stem}.{ext_label}"
+
+        # ── VECTOR EXPORT ─────────────────────────────────────────────────
+        else:
+            gdf = _read_full_gdf(path, ext)
+            if gdf is None:
+                return jsonify({"error": "Could not re-read file for export."}), 500
+
+            # 1 — value filters (with operator: =, !=, <, <=, >, >=, contains)
+            for f in val_filters:
+                col = f.get("column")
+                op  = f.get("operator", "=")
+                val = f.get("value", "")
+                if not col or col not in gdf.columns or val == "":
+                    continue
+                series = gdf[col]
+                # Try numeric comparison first, fall back to string
+                try:
+                    num_val = float(val)
+                    num_ser = pd.to_numeric(series, errors="coerce")
+                    if op == "=":        mask = num_ser == num_val
+                    elif op == "!=":     mask = num_ser != num_val
+                    elif op == "<":      mask = num_ser <  num_val
+                    elif op == "<=":     mask = num_ser <= num_val
+                    elif op == ">":      mask = num_ser >  num_val
+                    elif op == ">=":     mask = num_ser >= num_val
+                    elif op == "contains": mask = series.astype(str).str.contains(str(val), case=False, na=False)
+                    else:                mask = num_ser == num_val
+                except (ValueError, TypeError):
+                    s = series.astype(str).str.strip()
+                    v = str(val).strip()
+                    if op == "=":         mask = s == v
+                    elif op == "!=":      mask = s != v
+                    elif op == "contains": mask = s.str.contains(v, case=False, na=False)
+                    else:                  mask = s == v   # fallback for <,>,<=,>= on strings
+                gdf = gdf[mask.fillna(False)]
+
+            # 2 — temporal filter
+            if time_filter and time_filter.get("column"):
+                tcol = time_filter["column"]
+                if tcol in gdf.columns:
+                    gdf[tcol] = pd.to_datetime(gdf[tcol], errors="coerce", dayfirst=True)
+                    if time_filter.get("date_start"):
+                        gdf = gdf[gdf[tcol] >= pd.Timestamp(time_filter["date_start"])]
+                    if time_filter.get("date_end"):
+                        gdf = gdf[gdf[tcol] <= pd.Timestamp(time_filter["date_end"]
+                                                              + " 23:59:59")]
+
+            # 3 — spatial filter
+            if spatial_filt and hasattr(gdf, "geometry") and gdf.crs is not None:
+                geom_wgs84 = _build_filter_geom_wgs84(spatial_filt)
+                if geom_wgs84:
+                    ref_gdf = gpd.GeoDataFrame(geometry=[geom_wgs84], crs="EPSG:4326")
+                    ref_proj = ref_gdf.to_crs(gdf.crs)
+                    gdf = gdf[gdf.geometry.intersects(ref_proj.geometry.iloc[0])]
+
+            # 4 — column selection
+            if columns:
+                geo_col = gdf.geometry.name if hasattr(gdf, "geometry") else None
+                keep = [c for c in columns if c in gdf.columns]
+                if geo_col and geo_col not in keep:
+                    keep.append(geo_col)
+                gdf = gdf[keep]
+
+            # 5 — export
+            if fmt == "geojson":
+                export_path = os.path.join(PREVIEW_DIR, f"{safe_slug}_filtered.geojson")
+                gdf.to_crs(epsg=4326).to_file(export_path, driver="GeoJSON")
+                mime, dl_name = "application/geo+json", f"{clean_stem}.geojson"
+
+            elif fmt == "gpkg":
+                export_path = os.path.join(PREVIEW_DIR, f"{safe_slug}_filtered.gpkg")
+                gdf.to_crs(epsg=2154).to_file(export_path, driver="GPKG", layer=safe_slug[:50])
+                mime, dl_name = "application/geopackage+sqlite3", f"{clean_stem}.gpkg"
+
+            elif fmt == "shp":
+                shp_path = os.path.join(PREVIEW_DIR, f"{safe_slug}_filtered.shp")
+                shp_base = os.path.splitext(shp_path)[0]
+                gdf_shp, col_mapping = _sanitize_shp_columns(gdf.to_crs(epsg=2154).copy())
+                gdf_shp.to_file(shp_path, driver="ESRI Shapefile", encoding="utf-8")
+                with open(shp_base + ".cpg", "w") as _f: _f.write("UTF-8")
+                mapping_path = shp_base + "_field_names.csv"
+                with open(mapping_path, "w", encoding="utf-8-sig", newline="") as _f:
+                    w = _csv.writer(_f)
+                    w.writerow(["original_name", "shapefile_name"])
+                    for o, s in col_mapping.items(): w.writerow([o, s])
+                zip_path = os.path.join(PREVIEW_DIR, f"{safe_slug}_filtered_shp.zip")
+                with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for suf in [".shp", ".shx", ".dbf", ".prj", ".cpg"]:
+                        fp = shp_base + suf
+                        if os.path.exists(fp): zf.write(fp, os.path.basename(fp))
+                    zf.write(mapping_path, f"{safe_slug}_field_names.csv")
+                export_path = zip_path
+                mime, dl_name = "application/zip", f"{clean_stem}_shp.zip"
+
+            elif fmt == "geoparquet":
+                export_path = os.path.join(PREVIEW_DIR, f"{safe_slug}_filtered.parquet")
+                gdf.to_crs(epsg=4326).to_parquet(export_path, index=False)
+                mime, dl_name = "application/vnd.apache.parquet", f"{clean_stem}.parquet"
+
+            elif fmt == "csv":
+                export_path = os.path.join(PREVIEW_DIR, f"{safe_slug}_filtered_geo.csv")
+                gdf_out = gdf.to_crs(epsg=4326).copy() if gdf.crs else gdf.copy()
+                if hasattr(gdf_out, "geometry") and gdf_out.geometry.name in gdf_out.columns:
+                    gdf_out["geometry_wkt"] = gdf_out.geometry.apply(
+                        lambda g: g.wkt if g is not None else None)
+                    gdf_out = pd.DataFrame(gdf_out.drop(columns=gdf_out.geometry.name))
+                gdf_out.to_csv(export_path, index=False, encoding="utf-8-sig")
+                mime, dl_name = "text/csv", f"{clean_stem}_geo.csv"
+
+            else:
+                return jsonify({"error": f"Unknown format: {fmt}"}), 400
+
+        from flask import send_file
+        return send_file(export_path, mimetype=mime, as_attachment=True, download_name=dl_name)
+
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/export", methods=["GET"])
@@ -1208,6 +1754,45 @@ def batch_stop():
     """Request the running batch to stop after the current file."""
     batch_state["stop_requested"] = True
     return jsonify({"ok": True})
+
+@app.route("/raster_remap", methods=["POST"])
+def raster_remap():
+    """Re-inspect the last raster with a user-specified CRS override."""
+    from geodata_inspector.raster import inspect_raster
+
+    path = last_preview_path.get("path")
+    ext  = last_preview_path.get("ext", "")
+    if not path or not os.path.exists(path) or ext.lower() not in RASTER_EXTENSIONS:
+        return jsonify({"error": "No raster file available."}), 404
+
+    body = request.get_json(silent=True) or {}
+    try:
+        epsg = int(body.get("epsg", 0))
+        if epsg <= 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({"error": "A valid EPSG integer is required."}), 400
+
+    try:
+        result = inspect_raster(
+            path,
+            gdf_reference=gdf_reference,
+            metric_crs=METRIC_CRS,
+            wgs84_bounds=WGS84_BOUNDS,
+            inferred_label=UI.get("crs_inferred", "inferred"),
+            crs_override=epsg,
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify(_make_serializable({
+        "type":      "raster_extent",
+        "bounds":    result["map"]["bounds"],
+        "thumbnail": result["map"]["thumbnail"],
+        "crs":       result["summary"].get("CRS", f"EPSG:{epsg}"),
+    }))
+
 
 @app.route("/remap", methods=["POST"])
 def remap():
