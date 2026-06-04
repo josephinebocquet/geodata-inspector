@@ -21,57 +21,6 @@ from shapely import get_num_coordinates
 from shapely.geometry import box
 
 
-# def couverture_territoriale(gdf, gdf_reference, crs_metric=2154):
-
-#     # Check if data is empty
-#     if len(gdf) == 0:
-#         return {'Couverture territoriale (%)': 0}
-
-#     # Project to metric CRS for accurate area calculation
-#     if gdf.crs != crs_metric :
-#         gdf = gdf.to_crs(epsg=crs_metric)
-
-#     # Check again after projection
-#     if len(gdf) == 0:
-#         return {'Couverture territoriale (%)': 0}
-
-#     # Dissolve reference to get total territory
-#     ref_dissolved = gdf_reference.union_all()
-#     ref_area = ref_dissolved.area
-
-#     # Get geometry type
-#     geom_type = gdf.geometry.iloc[0].geom_type
-
-#     # Get data coverage based on geometry type
-#     if geom_type == 'Point':
-#         # For points: use convex hull
-#         data_coverage = gdf.union_all().convex_hull
-
-#     elif geom_type in ['LineString', 'MultiLineString']:
-#         # For lines: union all lines, then buffer to create area
-#         # Buffer size: 0.1% of reference diagonal
-#         ref_bounds = gdf_reference.total_bounds
-#         ref_width = ref_bounds[2] - ref_bounds[0]
-#         ref_height = ref_bounds[3] - ref_bounds[1]
-#         ref_diagonal = np.sqrt(ref_width**2 + ref_height**2)
-#         buffer_size = ref_diagonal * 0.001  # 0.1% of diagonal
-
-#         lines_union = gdf.union_all()
-#         data_coverage = lines_union.buffer(buffer_size)
-
-#     else:
-#         # For polygons and others: union directly
-#         data_coverage = gdf.union_all()
-
-#     # Calculate intersection with reference
-#     intersection = data_coverage.intersection(ref_dissolved)
-#     intersection_area = intersection.area
-
-#     # Calculate coverage percentage
-#     coverage_pct = (intersection_area / ref_area) * 100 if ref_area > 0 else 0
-
-#     return {'Couverture territoriale (%)': round(coverage_pct, 2)}
-
 def taux_de_remplissage(gdf, gdf_reference, crs_metric=2154):
     """
     Calculate the fill rate: ratio of actual data coverage vs bounding box.

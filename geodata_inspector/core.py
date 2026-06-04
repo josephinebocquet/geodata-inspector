@@ -380,13 +380,13 @@ def get_geo_columns_duckdb(conn, table_name):
 
             # Check geo_point format
             if 'point' in col_lc and 'geo' in col_lc and isinstance(sample_val, str) and ',' in sample_val:
-                return {**result, 'type': 'Point', 'method': 'geopoint', 'columns': [col], 'geotrans': "Présence Géométrie"}
+                return {**result, 'type': 'Point', 'method': 'geopoint', 'columns': [col], 'geotrans': "Géométrie native"}
 
             # Check GeoJSON
             try:
                 val = json.loads(sample_val) if isinstance(sample_val, str) else sample_val
                 if isinstance(val, dict) and 'type' in val and 'coordinates' in val:
-                    return {**result, 'type': val.get('type', 'Unknown'), 'method': 'geojson', 'columns': [col], 'geotrans': "Présence Géométrie"}
+                    return {**result, 'type': val.get('type', 'Unknown'), 'method': 'geojson', 'columns': [col], 'geotrans': "Géométrie native"}
             except Exception:
                 pass
 
@@ -395,7 +395,7 @@ def get_geo_columns_duckdb(conn, table_name):
                 sample_upper = sample_val.upper()
                 for geom_type in ['POINT', 'LINESTRING', 'POLYGON']:
                     if geom_type in sample_upper:
-                        return {**result, 'type': geom_type.title(), 'method': 'from_wkt', 'columns': [col], 'geotrans': "Présence Géométrie"}
+                        return {**result, 'type': geom_type.title(), 'method': 'from_wkt', 'columns': [col], 'geotrans': "Géométrie native"}
         except Exception:
             continue
 
@@ -409,7 +409,7 @@ def get_geo_columns_duckdb(conn, table_name):
             lon_col = col
 
     if lat_col and lon_col:
-        return {**result, 'type': 'Point', 'method': 'points_from_xy', 'columns': [lon_col, lat_col], 'geotrans': "Présence géométrie séparée (x,y)"}
+        return {**result, 'type': 'Point', 'method': 'points_from_xy', 'columns': [lon_col, lat_col], 'geotrans': "Coordonnées des points géographiques (x,y)"}
 
     # Check for X/Y pairs
     x_cols = [col for col in columns if re.search(x_pattern, col.lower())]
@@ -431,15 +431,15 @@ def get_geo_columns_duckdb(conn, table_name):
                                     if y_end != y_col and any(k in y_end.lower() for k in ['f', 'fin', 'end']):
                                         return {**result, 'type': 'LineString', 'method': 'linestring_coords',
                                                 'columns': [x_col, y_col, x_end, y_end],
-                                                'geotrans': "Présence géométrie multiples (x1,y1), (x2,y2)"}
+                                                'geotrans': "Coordonnées de lignes géographiques (x1,y1), (x2,y2)"}
 
                     # Otherwise, simple Point pair
-                    return {**result, 'type': 'Point', 'method': 'points_from_xy', 'columns': [x_col, y_col], 'geotrans': "Présence géométrie séparée (x,y)"}
-
+                    return {**result, 'type': 'Point', 'method': 'points_from_xy', 'columns': [x_col, y_col], 'geotrans': "Coordonnées des points géographiques (x,y)"}
+                    
     # Check for address columns
     for col in columns:
         if re.search(addr_pattern, col.lower()):
-            return {**result, 'type': 'Address', 'method': 'geocoding_required', 'columns': [col], 'geotrans': "Géocodage de l'adresse"}
+            return {**result, 'type': 'Address', 'method': 'geocoding_required', 'columns': [col], 'geotrans': "Géocodage requis"}
 
     # Collect INSEE/geographic keys
     for col in columns:

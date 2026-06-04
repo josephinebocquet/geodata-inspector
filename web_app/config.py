@@ -468,7 +468,7 @@ def get_result_key_translations(cfg):
             "Score de complétude moyen (%)": "Mean completeness score (%)",
             "Score de complétude std (%)": "Completeness std score (%)",
             
-            # Spatial metrics : native geometry, x/y coordinates, geocoding required, or spatial join.",
+            # Spatial metrics : 
             "CRS":                                      "CRS",
             "Types de géométrie":                       "Geometry types",
             "Emprise estimée (km2)":                    "Estimated extent (km2)",
