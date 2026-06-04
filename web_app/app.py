@@ -25,7 +25,6 @@ from config import get_config, get_reference_info, get_ui_labels
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "geodata-inspector-secret-key")
-app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2 GB max upload
 app.config["JSON_SORT_KEYS"] = False  # Preserve column order in JSON responses
 
 # Load configuration
@@ -41,6 +40,10 @@ GEO_KEY_PATTERNS = get_geo_key_patterns(_cfg)
 _loc_params = get_localisation_params(_cfg)
 WGS84_BOUNDS = _loc_params["wgs84_bounds"]
 METRIC_CRS = _loc_params["metric_crs"]
+
+# Upload size limit (None = unlimited)
+_max_mb = _cfg.get("server", {}).get("max_upload_size_mb")
+app.config["MAX_CONTENT_LENGTH"] = int(_max_mb) * 1024 * 1024 if _max_mb else None
 
 # Pre-load the reference geodataframe once at startup
 if _ref_info["available"]:
@@ -1241,6 +1244,16 @@ def remap():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.errorhandler(413)
+def request_too_large(e):
+    limit = app.config.get("MAX_CONTENT_LENGTH")
+    limit_mb = f"{limit // (1024*1024)} MB" if limit else "unknown"
+    return jsonify({
+        "error": f"File exceeds the configured upload limit ({limit_mb}). "
+                 f"Increase max_upload_size_mb in web_app/config.yaml or set it to null for no limit."
+    }), 413
 
 
 if __name__ == "__main__":
