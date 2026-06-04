@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ UI.page_title }}</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f7fa; color: #333; }
@@ -253,10 +255,119 @@
         }
         .result-download-btn:hover { background: #004d40; }
 
-        /* Export section */
+        /* Spatial filter Leaflet control */
+        .sfilt-ctrl {
+            background: white; border-radius: 4px;
+            box-shadow: 0 1px 5px rgba(0,0,0,0.35); overflow: hidden;
+        }
+        .sfilt-ctrl-btn {
+            display: flex; align-items: center; gap: 0.45rem;
+            width: 100%; padding: 6px 9px;
+            background: #e65100; color: #fff;
+            border: none; cursor: pointer; font-size: 0.78rem; font-weight: 600;
+            white-space: nowrap;
+        }
+        .sfilt-ctrl-btn:hover { background: #bf360c; }
+        .sfilt-ctrl-btn.has-filter { background: #2e7d32; }
+        .sfilt-ctrl-btn.has-filter:hover { background: #1b5e20; }
+        .sfilt-ctrl-body { padding: 0.45rem 0.6rem; border-top: 1px solid #f0f0f0; }
+        .sfilt-mode-row { display: flex; gap: 0.3rem; margin-bottom: 0.4rem; }
+        .sfilt-tab {
+            padding: 0.15rem 0.5rem; border: 1px solid #b0bec5; border-radius: 3px;
+            background: #fff; color: #455a64; font-size: 0.72rem; cursor: pointer;
+        }
+        .sfilt-tab.active { background: #e65100; color: #fff; border-color: #e65100; }
+        .sfilt-tab-clear {
+            margin-left: auto; background: none; border: none;
+            color: #e53935; cursor: pointer; font-size: 0.78rem; padding: 0 0.2rem;
+        }
+        .sfilt-buf-row { display: flex; align-items: center; gap: 0.4rem; }
+        .sfilt-radius-inp {
+            width: 48px; padding: 0.15rem 0.3rem; border: 1px solid #b0bec5;
+            border-radius: 3px; font-size: 0.72rem;
+        }
+        .sfilt-hint { font-size: 0.68rem; color: #78909c; margin-top: 0.3rem; max-width: 170px; }
+        .sfilt-status { font-size: 0.72rem; color: #2e7d32; font-weight: 600; margin-top: 0.25rem; }
+
+        /* Export trigger button */
         .export-section { margin-top: 1rem; display: none; }
-        .export-label { font-size: 0.85rem; color: #607d8b; margin-bottom: 0.5rem; }
-        .export-btns { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+        .export-open-btn {
+            padding: 0.45rem 1.2rem; background: #1565c0; color: #fff;
+            border: none; border-radius: 4px; cursor: pointer;
+            font-size: 0.85rem; font-weight: 500;
+        }
+        .export-open-btn:hover { background: #0d47a1; }
+
+        /* Export modal */
+        .exp-overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+            z-index: 2000; display: flex; align-items: center; justify-content: center;
+        }
+        .exp-modal {
+            background: #fff; border-radius: 10px; width: 820px; max-width: 96vw;
+            max-height: 90vh; display: flex; flex-direction: column;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+        }
+        .exp-header {
+            padding: 1rem 1.25rem 0.75rem; border-bottom: 1px solid #eceff1;
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .exp-header h3 { margin: 0; color: #1a1a2e; font-size: 1rem; }
+        .exp-close { background: none; border: none; font-size: 1.2rem; cursor: pointer; color: #607d8b; }
+        .exp-body { overflow-y: auto; padding: 1rem 1.25rem; flex: 1; }
+        .exp-section { margin-bottom: 1.2rem; }
+        .exp-section-title {
+            font-size: 0.78rem; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.05em; color: #455a64; margin-bottom: 0.6rem;
+            cursor: pointer; display: flex; align-items: center; gap: 0.4rem;
+        }
+        .exp-section-title::after { content: '▾'; font-size: 0.7rem; }
+        .exp-section-title.collapsed::after { content: '▸'; }
+        .exp-section-body { padding-left: 0.2rem; }
+
+        /* Format cards */
+        .exp-fmt-grid { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+        .exp-fmt-card {
+            border: 2px solid #b0bec5; border-radius: 6px; padding: 0.4rem 0.75rem;
+            font-size: 0.82rem; cursor: pointer; color: #37474f; background: #fff;
+            transition: border-color .15s, background .15s;
+        }
+        .exp-fmt-card:hover:not(.exp-fmt-disabled) { border-color: #1565c0; background: #e3f2fd; }
+        .exp-fmt-card.exp-fmt-selected { border-color: #1565c0; background: #1565c0; color: #fff; }
+        .exp-fmt-disabled { opacity: 0.38; cursor: not-allowed; }
+        .exp-fmt-card .fmt-icon { font-size: 0.7rem; margin-left: 0.3rem; }
+
+        /* Column/band checkboxes */
+        .exp-col-grid { display: flex; flex-wrap: wrap; gap: 0.35rem 1rem; max-height: 140px; overflow-y: auto; }
+        .exp-col-label { font-size: 0.8rem; display: flex; align-items: center; gap: 0.3rem; cursor: pointer; }
+
+        /* Value filters */
+        .exp-vf-row { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.4rem; }
+        .exp-vf-col, .exp-vf-val { flex: 1; padding: 0.25rem 0.4rem; border: 1px solid #b0bec5; border-radius: 4px; font-size: 0.8rem; }
+        .exp-vf-remove { background: none; border: none; color: #e53935; cursor: pointer; font-size: 1rem; }
+        .exp-add-btn { font-size: 0.78rem; color: #1565c0; background: none; border: none; cursor: pointer; padding: 0; }
+
+        /* Date range */
+        .exp-date-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+        .exp-date-input { padding: 0.25rem 0.4rem; border: 1px solid #b0bec5; border-radius: 4px; font-size: 0.8rem; }
+
+        /* Spatial filter */
+        .exp-spatial-tabs { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+        .exp-spatial-tab { padding: 0.25rem 0.7rem; border: 1px solid #b0bec5; border-radius: 4px; font-size: 0.8rem; cursor: pointer; background: #fff; color: #37474f; }
+        .exp-spatial-tab.active { background: #1565c0; color: #fff; border-color: #1565c0; }
+        #expMiniMap { height: 240px; border-radius: 6px; border: 1px solid #cfd8dc; margin-top: 0.5rem; }
+        .exp-buffer-controls { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.5rem; flex-wrap: wrap; }
+        .exp-radius-input { width: 80px; padding: 0.25rem 0.4rem; border: 1px solid #b0bec5; border-radius: 4px; font-size: 0.8rem; }
+        #expSpatialHint { font-size: 0.75rem; color: #78909c; margin-top: 0.3rem; }
+
+        /* Footer */
+        .exp-footer {
+            padding: 0.75rem 1.25rem; border-top: 1px solid #eceff1;
+            display: flex; justify-content: flex-end; gap: 0.6rem;
+        }
+        .exp-cancel-btn { padding: 0.4rem 1rem; background: #fff; color: #546e7a; border: 1px solid #b0bec5; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+        .exp-run-btn { padding: 0.4rem 1.2rem; background: #2e7d32; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem; font-weight: 600; }
+        .exp-run-btn:disabled { background: #90a4ae; cursor: not-allowed; }
         .export-btn {
             padding: 0.45rem 1rem; border: none; border-radius: 4px;
             cursor: pointer; font-size: 0.85rem; color: #fff; font-weight: 500;
@@ -404,7 +515,7 @@
                 <button class="upload-btn" id="browseBtn">{{ UI.browse_btn }}</button>
                 <button class="clear-btn" id="clearBtn">{{ UI.clear_btn }}</button>
                 <input type="file" id="fileInput" multiple
-                    accept=".csv,.txt,.xlsx,.geojson,.json,.shp,.gpkg,.zip,.shx,.dbf,.prj,.cpg">
+                    accept=".csv,.txt,.xlsx,.geojson,.json,.shp,.gpkg,.zip,.shx,.dbf,.prj,.cpg,.tif,.tiff,.img,.jp2,.asc,.hgt,.nc">
                 <p class="formats">{{ UI.formats_single }}</p>
                 <div class="file-info" id="fileInfo"></div>
 
@@ -444,14 +555,6 @@
                     </div>
                     <div class="batch-status-text" id="batchStatusText">{{ UI.batch_waiting }}</div>
                     <div class="batch-errors" id="batchErrors"></div>
-                    <div style="display:flex; gap:0.5rem; justify-content:center; flex-wrap:wrap; margin-top:0.8rem;">
-                        <button class="batch-download-btn" id="batchDownloadBtn" onclick="downloadBatchResults()" style="display:none; margin-top:0;">
-                           {{ UI.batch_download_csv }}
-                        </button>
-                        <button class="batch-download-btn" id="batchDownloadExcelBtn" onclick="downloadBatchExcel()" style="display:none; margin-top:0; background:#1565c0;">
-                           {{ UI.batch_download_excel }}
-                        </button>
-                    </div>
                 </div>
                 <p class="formats">{{ UI.formats_batch }}</p>
 
@@ -468,6 +571,16 @@
         </div>
 
         <div class="content-wrapper">
+            <!-- Batch download buttons — shown above the results table once processing starts -->
+            <div id="batchDownloadRow" style="display:none; gap:0.5rem; flex-wrap:wrap; margin-bottom:0.6rem;">
+                <button class="batch-download-btn" id="batchDownloadBtn" onclick="downloadBatchResults()" style="margin-top:0;">
+                    {{ UI.batch_download_csv }}
+                </button>
+                <button class="batch-download-btn" id="batchDownloadExcelBtn" onclick="downloadBatchExcel()" style="margin-top:0; background:#1565c0;">
+                    {{ UI.batch_download_excel }}
+                </button>
+            </div>
+
             <div class="batch-navigator" id="batchNavigator">
                 <div class="batch-nav-header">
                     <button class="batch-nav-btn" id="batchNavPrev" onclick="batchNavigate(-1)">&#8592;</button>
@@ -491,14 +604,9 @@
                     <div class="preview-table-wrap" id="previewTableWrap"></div>
                 </div>
                 <div class="export-section" id="exportSection">
-                    <p class="export-label">{{ UI.export_label }}</p>
-                    <div class="export-btns">
-                        <button class="export-btn geojson"    onclick="exportData('geojson')">GeoJSON</button>
-                        <button class="export-btn gpkg"       onclick="exportData('gpkg')">GeoPackage</button>
-                        <button class="export-btn shp"        onclick="exportData('shp')">Shapefile (.zip)</button>
-                        <button class="export-btn geoparquet" onclick="exportData('geoparquet')">GeoParquet</button>
-                        <button class="export-btn csv"        onclick="exportData('csv')">CSV + WKT</button>
-                    </div>
+                    <button class="export-open-btn" id="exportOpenBtn" onclick="openExportModal()">
+                        {{ UI.export_open_btn }}
+                    </button>
                     <div id="exportStatus" style="font-size:0.85rem; margin-top:0.5rem; color:#607d8b;"></div>
                 </div>
             </div>
@@ -595,6 +703,7 @@
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
     <script>
         const UI = {{ UI | tojson }};
         const dropZone       = document.getElementById('dropZone');
@@ -691,7 +800,8 @@
         fileInput.addEventListener('change', () => {
             if (!fileInput.files.length) return;
             const files = Array.from(fileInput.files);
-            const PRIMARY = ['.csv', '.txt', '.xlsx', '.geojson', '.json', '.shp', '.gpkg', '.zip'];
+            const PRIMARY = ['.csv', '.txt', '.xlsx', '.geojson', '.json', '.shp', '.gpkg', '.zip',
+                             '.tif', '.tiff', '.img', '.jp2', '.asc', '.hgt', '.nc'];
             const primary = files.find(f => {
                 const ext = f.name.substring(f.name.lastIndexOf('.')).toLowerCase();
                 return PRIMARY.includes(ext);
@@ -811,15 +921,8 @@
                     previewSection.style.display = 'block';
                     previewTableWrap.innerHTML = '';
                     previewBtn.textContent = UI.preview_btn;
-                    const exportSection = document.getElementById('exportSection');
-                    exportSection.style.display = 'block';
-                    const hasGeo = data.map !== null;
-                    exportSection.querySelectorAll('.export-btn').forEach(btn => {
-                        btn.disabled = !hasGeo;
-                        btn.style.opacity = hasGeo ? '1' : '0.4';
-                        btn.style.cursor = hasGeo ? 'pointer' : 'not-allowed';
-                        btn.title = hasGeo ? '' : UI.export_no_geo;
-                    });
+                    // Show export button for all file types
+                    document.getElementById('exportSection').style.display = 'block';
                     if (data.map) {
                         addLog(UI.log_map_generating);
                         document.getElementById('mapNote').style.display = 'block';
@@ -849,10 +952,50 @@
         // ── Display helpers ───────────────────────────────────────────────
         function formatValue(val, key = '') {
             if (val === null || val === undefined) return '<em>N/A</em>';
+            if (typeof val === 'object' && val._transposed_table && val.data) return renderTransposedTable(val.data);
             if (typeof val === 'object' && val._table && val.data) return renderNestedTable(val.data);
             if (typeof val === 'object' && val._datetime) return renderDatetimeAnalysis(val);
+            if (typeof val === 'object' && val._extent_table) return renderExtentTable(val);
             if (typeof val === 'object') return JSON.stringify(val, null, 2);
             return String(val);
+        }
+
+        function renderTransposedTable(rows) {
+            // Transpose: each original column becomes a row.
+            // First key of each row object is treated as the band name (column header).
+            if (!rows || rows.length === 0) return `<em>${UI.no_data || 'N/A'}</em>`;
+            const props   = Object.keys(rows[0]);
+            const nameKey = props[0];                // e.g. "Bande"
+            const metrics = props.slice(1);          // all other properties
+
+            let html = `<table class="nested-table"><thead><tr>`;
+            html += `<th></th>`;
+            rows.forEach(row => {
+                html += `<th>${row[nameKey] !== null && row[nameKey] !== undefined ? row[nameKey] : '—'}</th>`;
+            });
+            html += `</tr></thead><tbody>`;
+            metrics.forEach(metric => {
+                html += `<tr><th>${metric}</th>`;
+                rows.forEach(row => {
+                    const cell = row[metric];
+                    html += `<td>${cell !== null && cell !== undefined ? cell : '—'}</td>`;
+                });
+                html += `</tr>`;
+            });
+            html += `</tbody></table>`;
+            return html;
+        }
+
+        function renderExtentTable(extent) {
+            // Render the 4 corner coordinates as a compact 2-column table
+            const rows = Object.entries(extent)
+                .filter(([k]) => k !== '_extent_table');
+            let html = '<table class="nested-table two-col"><tbody>';
+            rows.forEach(([corner, coords]) => {
+                html += `<tr><th style="white-space:nowrap;">${corner}</th><td style="font-family:monospace;">${coords}</td></tr>`;
+            });
+            html += '</tbody></table>';
+            return html;
         }
 
         function renderNestedTable(data) {
@@ -1022,13 +1165,21 @@
         }
         function displayDatetime(dt) {
             const section = document.getElementById('datetimeSection');
-            if (!dt || (!dt.interval_pairs?.length && !dt.singles?.length)) {
-                section.style.display = 'none';
+            section.style.display = 'block';
+
+            const hasData = dt && (dt.interval_pairs?.length || dt.singles?.length);
+            if (!hasData) {
+                // Show section but hide the filter panels and show a no-data message
+                section.querySelectorAll('.dt-filter-panel').forEach(p => { p.style.display = 'none'; });
+                document.getElementById('dtOccContent').innerHTML =
+                    `<p style="color:#90a4ae; font-style:italic; font-size:0.85rem; margin:0.4rem 0 1rem;">${UI.dt_no_data}</p>`;
+                document.getElementById('dtValContent').innerHTML = '';
                 return;
             }
-            _initTemporalControls(dt);   // populates both panels + renders initial occupancy chart
+            // Restore filter panels (may have been hidden by a previous no-data call)
+            section.querySelectorAll('.dt-filter-panel').forEach(p => { p.style.display = ''; });
+            _initTemporalControls(dt);
             document.getElementById('dtValContent').innerHTML = '';
-            section.style.display = 'block';
         }
 
         // ── Temporal analysis controls ────────────────────────────────────
@@ -1360,10 +1511,218 @@
         }
 
         // ── Preview ───────────────────────────────────────────────────────
+        // ── Main-map spatial filter (Leaflet custom control) ─────────────
+        let _mainSpatialMode   = 'buffer';
+        let _mainSpatialFilter = null;
+        let _mainSpatialLayer  = null;
+        let _mainDrawFG        = null;
+        let _mainDrawCtrl      = null;
+        let _mainBufCenter     = null;
+        let _mainSfiltControl  = null;   // Leaflet control instance
+
+        // Build and add the control to the main map
+        function _addSpatialFilterControl() {
+            if (_mainSfiltControl) { map.removeControl(_mainSfiltControl); _mainSfiltControl = null; }
+
+            _mainSfiltControl = L.control({ position: 'topleft' });
+            _mainSfiltControl.onAdd = function () {
+                const wrap = L.DomUtil.create('div', 'sfilt-ctrl');
+
+                // Header button
+                const btn = L.DomUtil.create('button', 'sfilt-ctrl-btn', wrap);
+                btn.id        = 'sfiltCtrlBtn';
+                btn.innerHTML = `🔍 ${UI.sfilt_title || 'Filtre spatial'}`;
+                L.DomEvent.on(btn, 'click', L.DomEvent.stopPropagation);
+                L.DomEvent.on(btn, 'click', () => _toggleSfiltBody(wrap));
+
+                // Body (collapsed by default)
+                const body = L.DomUtil.create('div', 'sfilt-ctrl-body', wrap);
+                body.id           = 'sfiltCtrlBody';
+                body.style.display = 'none';
+                body.innerHTML = `
+                    <div class="sfilt-mode-row">
+                        <button class="sfilt-tab active" id="sfiltBufTab"
+                                onclick="setMainSpatialMode('buffer')">
+                            ${UI.sfilt_buffer || 'Zone tampon'}</button>
+                        <button class="sfilt-tab" id="sfiltPolyTab"
+                                onclick="setMainSpatialMode('polygon')">
+                            ${UI.sfilt_polygon || 'Polygone'}</button>
+                        <button class="sfilt-tab-clear" title="${UI.sfilt_clear || 'Effacer'}"
+                                onclick="clearMainSpatialFilter()">✕</button>
+                    </div>
+                    <div class="sfilt-buf-row" id="sfiltBufferCtrl">
+                        <span style="font-size:0.72rem;">${UI.sfilt_radius || 'Rayon'}</span>
+                        <input type="number" id="sfiltRadius" class="sfilt-radius-inp"
+                               value="5" min="0.1" step="0.5"
+                               oninput="_onMainRadiusChange()">
+                        <span style="font-size:0.7rem; color:#90a4ae;">km</span>
+                    </div>
+                    <div class="sfilt-hint" id="sfiltHint"></div>
+                    <div class="sfilt-status" id="sfiltStatus"></div>`;
+
+                // Prevent map clicks inside the body from propagating
+                L.DomEvent.disableClickPropagation(wrap);
+                L.DomEvent.disableScrollPropagation(wrap);
+                return wrap;
+            };
+            _mainSfiltControl.addTo(map);
+            // Initialise mode display after DOM is ready
+            setTimeout(() => setMainSpatialMode('buffer'), 0);
+        }
+
+        function _toggleSfiltBody(wrap) {
+            const body = wrap.querySelector('#sfiltCtrlBody');
+            const open = body.style.display !== 'none';
+            body.style.display = open ? 'none' : '';
+            if (!open) {
+                _initMainDrawFG();
+                setMainSpatialMode(_mainSpatialMode);
+            }
+        }
+
+        function setMainSpatialMode(mode) {
+            _mainSpatialMode = mode;
+            const bufTab  = document.getElementById('sfiltBufTab');
+            const polyTab = document.getElementById('sfiltPolyTab');
+            const bufCtrl = document.getElementById('sfiltBufferCtrl');
+            const hint    = document.getElementById('sfiltHint');
+            if (!bufTab) return;
+            bufTab.classList.toggle('active',  mode === 'buffer');
+            polyTab.classList.toggle('active', mode === 'polygon');
+            bufCtrl.style.display = mode === 'buffer' ? 'flex' : 'none';
+            hint.textContent = mode === 'buffer'
+                ? (UI.sfilt_buf_hint  || 'Cliquez sur la carte pour définir le centre')
+                : (UI.sfilt_poly_hint || 'Utilisez les outils de dessin');
+            _setupMainMapInteraction(mode);
+        }
+
+        function _initMainDrawFG() {
+            if (!map || _mainDrawFG) return;
+            _mainDrawFG = new L.FeatureGroup().addTo(map);
+        }
+
+        function _setupMainMapInteraction(mode) {
+            if (!map) return;
+            if (_mainDrawCtrl) { map.removeControl(_mainDrawCtrl); _mainDrawCtrl = null; }
+            map.off('click.sfilt');
+
+            if (mode === 'buffer') {
+                map.on('click.sfilt', e => { _mainBufCenter = e.latlng; _updateMainFilter(); });
+            } else {
+                if (!_mainDrawFG) _initMainDrawFG();
+                _mainDrawFG.clearLayers();
+                _mainDrawCtrl = new L.Control.Draw({
+                    draw: { polygon: true, rectangle: true, circle: false,
+                            marker: false, polyline: false, circlemarker: false },
+                    edit: { featureGroup: _mainDrawFG }
+                });
+                map.addControl(_mainDrawCtrl);
+                map.on(L.Draw.Event.CREATED, e => {
+                    _mainDrawFG.clearLayers();
+                    _mainDrawFG.addLayer(e.layer);
+                    _mainSpatialFilter = { type: 'polygon', geojson: e.layer.toGeoJSON().geometry };
+                    _applyMainFilter();
+                });
+            }
+        }
+
+        function _onMainRadiusChange() { if (_mainBufCenter) _updateMainFilter(); }
+
+        function _updateMainFilter() {
+            if (_mainSpatialLayer) { map.removeLayer(_mainSpatialLayer); _mainSpatialLayer = null; }
+            if (!_mainBufCenter) return;
+            const km = parseFloat(document.getElementById('sfiltRadius')?.value) || 5;
+
+            if (window.turf) {
+                const buf = turf.buffer(turf.point([_mainBufCenter.lng, _mainBufCenter.lat]),
+                                        km, { units: 'kilometers' });
+                _mainSpatialLayer = L.geoJSON(buf, {
+                    style: { color: '#e65100', weight: 2, fillOpacity: 0.15, fillColor: '#e65100' }
+                }).addTo(map);
+            } else {
+                _mainSpatialLayer = L.circle(_mainBufCenter, {
+                    radius: km * 1000, color: '#e65100', weight: 2, fillOpacity: 0.15
+                }).addTo(map);
+            }
+            _mainSpatialFilter = { type: 'buffer', lat: _mainBufCenter.lat,
+                                   lon: _mainBufCenter.lng, radius_km: km };
+            // Tint the control button to show filter is active
+            const btn = document.getElementById('sfiltCtrlBtn');
+            if (btn) btn.classList.add('has-filter');
+            _applyMainFilter();
+        }
+
+        async function _applyMainFilter() {
+            if (!_mainSpatialFilter) return;
+            previewTableWrap.innerHTML = '';
+            if (previewSection.style.display !== 'none') await _loadFilteredPreview();
+        }
+
+        function clearMainSpatialFilter() {
+            if (_mainSpatialLayer) { map.removeLayer(_mainSpatialLayer); _mainSpatialLayer = null; }
+            if (_mainDrawFG)       { _mainDrawFG.clearLayers(); }
+            if (_mainDrawCtrl)     { map.removeControl(_mainDrawCtrl); _mainDrawCtrl = null; }
+            if (map)               { map.off('click.sfilt'); }
+            _mainSpatialFilter = null; _mainBufCenter = null; _mainDrawFG = null;
+            const btn = document.getElementById('sfiltCtrlBtn');
+            if (btn) btn.classList.remove('has-filter');
+            const st = document.getElementById('sfiltStatus');
+            if (st) st.textContent = '';
+            // Collapse the control body
+            const body = document.getElementById('sfiltCtrlBody');
+            if (body) body.style.display = 'none';
+            previewTableWrap.innerHTML = '';
+            previewBtn.textContent = UI.preview_btn;
+        }
+
+        async function _loadFilteredPreview() {
+            previewBtn.textContent = UI.preview_loading;
+            previewBtn.disabled = true;
+            try {
+                const resp = await fetch('/preview_filtered', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ spatial_filter: _mainSpatialFilter })
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    previewTableWrap.innerHTML = `<p style="color:#c62828">${data.error}</p>`;
+                } else {
+                    // Count badge
+                    document.getElementById('sfiltStatus').textContent =
+                        `${data.total_filtered} / ${data.total_before} ${UI.sfilt_rows_match || 'lignes sélectionnées'}`;
+                    let html = '<table class="preview-table"><thead><tr>';
+                    data.columns.forEach(c => { html += `<th title="${c}">${c}</th>`; });
+                    html += '</tr></thead><tbody>';
+                    data.rows.forEach(row => {
+                        html += '<tr>';
+                        row.forEach(v => {
+                            const d = v !== null && v !== undefined ? String(v) : '';
+                            html += `<td title="${d}">${d}</td>`;
+                        });
+                        html += '</tr>';
+                    });
+                    html += '</tbody></table>';
+                    previewTableWrap.innerHTML = html;
+                }
+            } catch(e) {
+                previewTableWrap.innerHTML = `<p style="color:#c62828">${e.message}</p>`;
+            } finally {
+                previewBtn.textContent = UI.preview_btn;
+                previewBtn.disabled = false;
+            }
+        }
+
         async function loadPreview() {
             if (previewTableWrap.innerHTML !== '') {
                 previewTableWrap.innerHTML = '';
                 previewBtn.textContent = UI.preview_btn;
+                return;
+            }
+            // Use filtered preview if a spatial filter is active
+            if (_mainSpatialFilter) {
+                previewSection.style.display = 'block';
+                await _loadFilteredPreview();
                 return;
             }
             previewBtn.textContent = UI.preview_loading;
@@ -1449,6 +1808,10 @@
                 alert(`Erreur : ${e.message}`);
             }
         }
+        // Tracks whether the current file on the map is a raster
+        let _currentMapIsRaster = false;
+        let _currentMapData     = null;   // last mapData passed to displayMap()
+
         async function applyRemap() {
             const epsg = parseInt(document.getElementById('crsInput').value);
             const statusEl = document.getElementById('remapStatus');
@@ -1456,16 +1819,17 @@
 
             if (!epsg || epsg <= 0) {
                 statusEl.style.color = '#e53935';
-                statusEl.textContent = 'Please enter a valid EPSG code.';
+                statusEl.textContent = UI.crs_invalid_epsg || 'Code EPSG invalide.';
                 return;
             }
 
             btn.disabled = true;
             statusEl.style.color = '#546e7a';
-            statusEl.textContent = 'Reprojecting...';
+            statusEl.textContent = UI.crs_reprojecting || '…';
 
+            const endpoint = _currentMapIsRaster ? '/raster_remap' : '/remap';
             try {
-                const resp = await fetch('/remap', {
+                const resp = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ epsg })
@@ -1474,15 +1838,16 @@
 
                 if (!resp.ok || data.error) {
                     statusEl.style.color = '#e53935';
-                    statusEl.textContent = data.error || 'Error reprojecting.';
+                    statusEl.textContent = data.error || (UI.crs_remap_error || 'Erreur.');
                 } else {
                     statusEl.style.color = '#2e7d32';
-                    statusEl.textContent = `✓ Reprojected as EPSG:${epsg}`;
-                    displayMap(data);
+                    statusEl.textContent = `✓ EPSG:${epsg}`;
+                    // For rasters, data is the map object directly; for vectors it's already mapData shape
+                    displayMap(_currentMapIsRaster ? data : data);
                 }
             } catch (e) {
                 statusEl.style.color = '#e53935';
-                statusEl.textContent = `Connection error: ${e.message}`;
+                statusEl.textContent = UI.status_conn_error.replace('{msg}', e.message);
             } finally {
                 btn.disabled = false;
             }
@@ -1492,10 +1857,16 @@
             if (map) { map.remove(); }
             mapDiv.style.display = 'block';
             noMapData.style.display = 'none';
-            map = L.map('map').setView(mapData.center, 6);
+
+            const center = mapData.center ||
+                (mapData.bounds ? [(mapData.bounds[0][0]+mapData.bounds[1][0])/2,
+                                   (mapData.bounds[0][1]+mapData.bounds[1][1])/2] : [0, 0]);
+            map = L.map('map').setView(center, 6);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             }).addTo(map);
+
+            // ── Vector data ──────────────────────────────────────────────
             if (mapData.geojson) {
                 L.geoJSON(mapData.geojson, {
                     style: { color: '#1976d2', weight: 2, opacity: 0.7, fillOpacity: 0.3 },
@@ -1507,13 +1878,41 @@
                     }
                 }).addTo(map);
             }
+
+            // Track file type for CRS override routing
+            _currentMapIsRaster = (mapData.type === 'raster_extent');
+            _currentMapData     = mapData;
+
+            // ── Raster data ──────────────────────────────────────────────
+            if (mapData.type === 'raster_extent' && mapData.bounds) {
+                const bnds = mapData.bounds;  // [[ymin,xmin],[ymax,xmax]]
+                // Thumbnail overlay (if available)
+                if (mapData.thumbnail) {
+                    L.imageOverlay(
+                        `data:image/png;base64,${mapData.thumbnail}`,
+                        bnds, { opacity: 0.80 }
+                    ).addTo(map);
+                }
+                // Subtle extent rectangle (only shown when there is no thumbnail)
+                if (!mapData.thumbnail) {
+                    L.rectangle(bnds, {
+                        color: '#1976d2', weight: 1.5, fill: false, dashArray: '4,4'
+                    }).addTo(map);
+                }
+            }
+
             mapContainer.style.display = 'block';
             setTimeout(() => {
                 map.invalidateSize();
                 if (mapData.bounds) { map.fitBounds(mapData.bounds, { padding: [20, 20] }); }
             }, 100);
+            // Always show the CRS override panel (works for both vector and raster)
             document.getElementById('crsOverridePanel').style.display = 'block';
             document.getElementById('remapStatus').textContent = '';
+            // Add spatial filter control for vector data with geometry
+            const hasSfilt = !_currentMapIsRaster && !!mapData.geojson;
+            if (hasSfilt) { _addSpatialFilterControl(); }
+            else { clearMainSpatialFilter(); }
         }
 
 // ── Batch processing ──────────────────────────────────────────────
@@ -1547,7 +1946,7 @@
             document.getElementById('batchStatusText').textContent = UI.batch_sending;
             document.getElementById('progressBar').style.width = '0%';
             document.getElementById('batchErrors').textContent = '';
-            document.getElementById('batchDownloadBtn').style.display = 'none';
+            document.getElementById('batchDownloadRow').style.display = 'none';
             document.getElementById('batchNavigator').style.display = 'none';
         }
 
@@ -1588,6 +1987,7 @@
             document.getElementById('crsOverridePanel').style.display = 'none';
             document.getElementById('crsInput').value = '';
             document.getElementById('remapStatus').textContent = '';
+            clearMainSpatialFilter();
             previewSection.style.display = 'none';
             previewTableWrap.innerHTML = '';
             document.getElementById('resultDownloadBtn').style.display = 'none';
@@ -1605,7 +2005,8 @@
             resetBatchProgress();
             resetMainResults();
             // Primary formats to count as "data files"
-            const PRIMARY = ['.csv', '.txt', '.xlsx', '.geojson', '.json', '.shp', '.gpkg', '.zip'];
+            const PRIMARY = ['.csv', '.txt', '.xlsx', '.geojson', '.json', '.shp', '.gpkg', '.zip',
+                             '.tif', '.tiff', '.img', '.jp2', '.asc', '.hgt', '.nc'];
             // Sidecar files required by shapefiles — must be uploaded too but not counted
             const SIDECAR = ['.shx', '.dbf', '.prj', '.cpg', '.qpj', '.sbn', '.sbx'];
             const formData = new FormData();
@@ -1704,8 +2105,7 @@
                     clearInterval(batchPollInterval);
                     setBatchBtnsDisabled(false);
                     if (s.has_output) {
-                        document.getElementById('batchDownloadBtn').style.display = 'inline-block';
-                        document.getElementById('batchDownloadExcelBtn').style.display = 'inline-block';
+                        document.getElementById('batchDownloadRow').style.display = 'flex';
                     }
                     // Final update of total
                     batchTotalResults = s.total;
@@ -1766,15 +2166,7 @@
                     document.getElementById('mapNote').style.display = 'none';
                 }
 
-                // Show export section, disabled if no geo data
-                const exportSection = document.getElementById('exportSection');
-                exportSection.style.display = 'block';
-                const hasGeo = data.map !== null;
-                exportSection.querySelectorAll('.export-btn').forEach(btn => {
-                    btn.disabled = !hasGeo;
-                    btn.style.opacity = hasGeo ? '1' : '0.4';
-                    btn.style.cursor = hasGeo ? 'pointer' : 'not-allowed';
-                    btn.title = hasGeo ? '' : UI.export_no_geo;                });
+                document.getElementById('exportSection').style.display = 'block';
 
                 // Hide preview (no file loaded for single-file preview)
                 previewSection.style.display = 'none';
@@ -1806,8 +2198,7 @@
             document.getElementById('batchProgress').style.display = 'none';
             document.getElementById('batchStopBtn').style.display = 'none';
             document.getElementById('batchClearBtn').style.display = 'none';
-            document.getElementById('batchDownloadBtn').style.display = 'none';
-            document.getElementById('batchDownloadExcelBtn').style.display = 'none';
+            document.getElementById('batchDownloadRow').style.display = 'none';
             results.style.display = 'none';
             mapContainer.style.display = 'none';
             if (map) { map.remove(); map = null; }
@@ -1816,6 +2207,478 @@
             batchTotalResults = 0;
             if (batchPollInterval) { clearInterval(batchPollInterval); batchPollInterval = null; }
         }
+    </script>
+
+    <!-- ── Export modal ──────────────────────────────────────────────────── -->
+    <div id="exportModal" class="exp-overlay" style="display:none;" onclick="if(event.target===this)closeExportModal()">
+      <div class="exp-modal">
+
+        <div class="exp-header">
+          <h3 id="expModalTitle"></h3>
+          <button class="exp-close" onclick="closeExportModal()">✕</button>
+        </div>
+
+        <div class="exp-body">
+
+          <!-- Section 1: Format -->
+          <div class="exp-section">
+            <div class="exp-section-title" onclick="toggleExpSection(this)">{{ UI.export_fmt_section }}</div>
+            <div class="exp-section-body">
+              <div class="exp-fmt-grid" id="expFmtGrid"></div>
+            </div>
+          </div>
+
+          <!-- Section 2: Columns / Bands -->
+          <div class="exp-section">
+            <div class="exp-section-title" onclick="toggleExpSection(this)" id="expColSectionTitle"></div>
+            <div class="exp-section-body" id="expColBody">
+              <label style="font-size:0.8rem; display:flex; align-items:center; gap:0.4rem; margin-bottom:0.5rem; cursor:pointer;">
+                <input type="checkbox" id="expColAll" onchange="toggleAllCols(this)" checked>
+                <span id="expColAllLabel"></span>
+              </label>
+              <div class="exp-col-grid" id="expColGrid"></div>
+            </div>
+          </div>
+
+          <!-- Section 3: Value filters (vector only) -->
+          <div class="exp-section" id="expValSection">
+            <div class="exp-section-title" onclick="toggleExpSection(this)">{{ UI.export_val_section }}</div>
+            <div class="exp-section-body">
+              <div id="expVfRows"></div>
+              <button class="exp-add-btn" onclick="addValueFilter()">{{ UI.export_val_add }}</button>
+            </div>
+          </div>
+
+          <!-- Section 4: Temporal filter (vector only) -->
+          <div class="exp-section" id="expTimeSection">
+            <div class="exp-section-title" onclick="toggleExpSection(this)">{{ UI.export_time_section }}</div>
+            <div class="exp-section-body">
+              <div class="exp-date-row" style="margin-bottom:0.5rem;">
+                <span style="font-size:0.78rem; color:#455a64; min-width:80px;">{{ UI.export_time_col }}</span>
+                <select id="expTimeCol" class="dt-select" style="min-width:160px;"></select>
+              </div>
+              <div class="exp-date-row">
+                <span style="font-size:0.78rem; color:#455a64; min-width:80px;">{{ UI.export_time_from }}</span>
+                <input type="date" id="expTimeFrom" class="exp-date-input">
+                <span style="font-size:0.78rem; color:#455a64;">{{ UI.export_time_to }}</span>
+                <input type="date" id="expTimeTo" class="exp-date-input">
+              </div>
+            </div>
+          </div>
+
+          <!-- Section 5: Spatial filter -->
+          <div class="exp-section">
+            <div class="exp-section-title" onclick="toggleExpSection(this)">{{ UI.export_spatial_section }}</div>
+            <div class="exp-section-body">
+              <div class="exp-spatial-tabs">
+                <button class="exp-spatial-tab active" id="expSpatNoneTab"   onclick="setSpatialMode('none')">—</button>
+                <button class="exp-spatial-tab"        id="expSpatBufTab"    onclick="setSpatialMode('buffer')">{{ UI.export_spatial_buffer }}</button>
+                <button class="exp-spatial-tab"        id="expSpatPolyTab"   onclick="setSpatialMode('polygon')">{{ UI.export_spatial_polygon }}</button>
+              </div>
+              <div id="expBufferControls" style="display:none;">
+                <div class="exp-buffer-controls">
+                  <span style="font-size:0.78rem; color:#455a64;">{{ UI.export_spatial_radius }}</span>
+                  <input type="number" id="expRadius" class="exp-radius-input" value="5" min="0.1" step="0.1" oninput="_updateFilterPreview()">
+                  <span style="font-size:0.75rem; color:#90a4ae;">km</span>
+                </div>
+              </div>
+              <p id="expSpatialHint" style="display:none;"></p>
+              <div id="expMiniMap" style="display:none;"></div>
+            </div>
+          </div>
+
+        </div><!-- /.exp-body -->
+
+        <div class="exp-footer">
+          <button class="exp-cancel-btn" onclick="closeExportModal()">{{ UI.export_cancel }}</button>
+          <button class="exp-run-btn" id="expRunBtn" onclick="runExport()">{{ UI.export_run }}</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+    // ── Export modal state ────────────────────────────────────────────────
+    let _expState = {
+        isRaster: false, hasGeo: false, formats: {},
+        columns: [], bands: [], dateInfo: null,
+        selectedFmt: null, spatialMode: 'none',
+        miniMap: null, markerLayer: null, drawLayer: null, drawnShape: null,
+        bufferCenter: null,
+        filterShapeLayer: null,   // circle / polygon showing the filter zone
+        highlightLayer: null,     // selected features inside the filter
+    };
+
+    function toggleExpSection(title) {
+        title.classList.toggle('collapsed');
+        const body = title.nextElementSibling;
+        body.style.display = title.classList.contains('collapsed') ? 'none' : '';
+    }
+
+    // ── Open / close ─────────────────────────────────────────────────────
+    async function openExportModal() {
+        const resp = await fetch('/export_info');
+        if (!resp.ok) { alert('Could not load export info.'); return; }
+        const info = await resp.json();
+
+        _expState.isRaster   = info.is_raster;
+        _expState.hasGeo     = info.has_geometry;
+        _expState.formats    = info.formats;
+        _expState.columns    = info.columns || [];
+        _expState.bands      = info.bands || [];
+        _expState.dateInfo   = info.date_info;
+        _expState.selectedFmt = null;
+        _expState.spatialMode = 'none';
+        _expState.bufferCenter = null;
+        _expState.drawnShape   = null;
+
+        document.getElementById('expModalTitle').textContent = UI.export_modal_title;
+        _buildFmtGrid();
+        _buildColGrid();
+        _buildTimeSection();
+        _setSpatialMode_reset();
+        // Hide vector-only sections for raster
+        document.getElementById('expValSection').style.display  = info.is_raster ? 'none' : '';
+        document.getElementById('expTimeSection').style.display = info.is_raster || !info.date_info ? 'none' : '';
+
+        document.getElementById('exportModal').style.display = 'flex';
+        setTimeout(() => _initMiniMap(), 100);
+    }
+
+    function closeExportModal() {
+        document.getElementById('exportModal').style.display = 'none';
+        if (_expState.miniMap) { _expState.miniMap.remove(); _expState.miniMap = null; }
+    }
+
+    // ── Format grid ───────────────────────────────────────────────────────
+    const _FMT_ICONS = {geojson:'🗺', gpkg:'📦', shp:'🗜', geoparquet:'🪨',
+                        csv:'📄', tif:'🛰', nc:'🌐', jp2:'🖼', img:'🖼', asc:'📊'};
+    function _buildFmtGrid() {
+        const grid = document.getElementById('expFmtGrid');
+        grid.innerHTML = '';
+        Object.entries(_expState.formats).forEach(([key, info]) => {
+            const card = document.createElement('div');
+            card.className = 'exp-fmt-card' + (info.available ? '' : ' exp-fmt-disabled');
+            card.dataset.fmt = key;
+            card.innerHTML = `${info.label} <span class="fmt-icon">${_FMT_ICONS[key]||''}</span>`;
+            if (!info.available) {
+                card.title = _expState.isRaster ? 'Vecteur uniquement' : 'Raster uniquement';
+            } else {
+                card.onclick = () => _selectFmt(key, card);
+            }
+            grid.appendChild(card);
+        });
+    }
+    function _selectFmt(key, card) {
+        document.querySelectorAll('.exp-fmt-card').forEach(c => c.classList.remove('exp-fmt-selected'));
+        card.classList.add('exp-fmt-selected');
+        _expState.selectedFmt = key;
+    }
+
+    // ── Column / band grid ────────────────────────────────────────────────
+    function _buildColGrid() {
+        const isRaster = _expState.isRaster;
+        const items    = isRaster ? _expState.bands  : _expState.columns;
+        document.getElementById('expColSectionTitle').textContent =
+            isRaster ? UI.export_band_section : UI.export_col_section;
+        document.getElementById('expColAllLabel').textContent = UI.export_col_all;
+        document.getElementById('expColAll').checked = true;
+
+        const grid = document.getElementById('expColGrid');
+        grid.innerHTML = '';
+        items.forEach(item => {
+            const id  = isRaster ? item.index : item;
+            const lbl = isRaster ? `${item.name} (band ${item.index})` : item;
+            const el  = document.createElement('label');
+            el.className = 'exp-col-label';
+            el.innerHTML = `<input type="checkbox" class="exp-col-cb" value="${id}" checked> ${lbl}`;
+            grid.appendChild(el);
+        });
+        grid.style.display = items.length > 0 ? '' : 'none';
+    }
+    function toggleAllCols(cb) {
+        document.querySelectorAll('.exp-col-cb').forEach(c => { c.checked = cb.checked; });
+    }
+
+    // ── Value filters ─────────────────────────────────────────────────────
+    function addValueFilter() {
+        const row = document.createElement('div');
+        row.className = 'exp-vf-row';
+        const colOpts = _expState.columns.map(c => `<option value="${c}">${c}</option>`).join('');
+        row.innerHTML = `
+            <select class="exp-vf-col">${colOpts}</select>
+            <select class="exp-vf-op" style="width:60px; padding:0.25rem 0.2rem; border:1px solid #b0bec5; border-radius:4px; font-size:0.8rem;">
+                <option value="=">=</option>
+                <option value="!=">≠</option>
+                <option value="<">&lt;</option>
+                <option value="<=">&le;</option>
+                <option value=">">&gt;</option>
+                <option value=">=">&ge;</option>
+                <option value="contains">∋</option>
+            </select>
+            <input class="exp-vf-val" placeholder="${UI.export_val_val_ph}">
+            <button class="exp-vf-remove" onclick="this.parentElement.remove()">✕</button>`;
+        document.getElementById('expVfRows').appendChild(row);
+    }
+
+    // ── Time filter ───────────────────────────────────────────────────────
+    function _buildTimeSection() {
+        const di = _expState.dateInfo;
+        if (!di) return;
+        const sel = document.getElementById('expTimeCol');
+        sel.innerHTML = (di.all_columns || [di.column]).map(c => `<option>${c}</option>`).join('');
+        document.getElementById('expTimeFrom').value = di.global_min || '';
+        document.getElementById('expTimeTo').value   = di.global_max || '';
+        document.getElementById('expTimeFrom').min   = di.global_min || '';
+        document.getElementById('expTimeFrom').max   = di.global_max || '';
+        document.getElementById('expTimeTo').min     = di.global_min || '';
+        document.getElementById('expTimeTo').max     = di.global_max || '';
+    }
+
+    // ── Spatial filter & mini-map ─────────────────────────────────────────
+    function _setSpatialMode_reset() { setSpatialMode('none'); }
+
+    function setSpatialMode(mode) {
+        _expState.spatialMode = mode;
+        ['none','buffer','polygon'].forEach(m => {
+            document.getElementById(`expSpat${m.charAt(0).toUpperCase()+m.slice(1)}Tab`)
+                    ?.classList.toggle('active', m === mode);
+        });
+        document.getElementById('expBufferControls').style.display = (mode === 'buffer')  ? '' : 'none';
+        const mapDiv  = document.getElementById('expMiniMap');
+        const hintEl  = document.getElementById('expSpatialHint');
+        mapDiv.style.display  = (mode !== 'none') ? '' : 'none';
+        hintEl.style.display  = (mode !== 'none') ? '' : 'none';
+        if (mode === 'buffer')  hintEl.textContent = UI.export_spatial_click;
+        if (mode === 'polygon') hintEl.textContent = UI.export_spatial_draw;
+
+        _expState.bufferCenter = null;
+        _expState.drawnShape   = null;
+
+        if (mode !== 'none' && _expState.miniMap) {
+            _refreshMiniMapMode(mode);
+        }
+    }
+
+    function _initMiniMap() {
+        if (_expState.miniMap) return;
+        _expState.miniMap = L.map('expMiniMap').setView([48.85775, 2.33942], 10);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(_expState.miniMap);
+
+        // ── Overlay the dataset so the user can see what they're filtering ──
+        if (_currentMapData) {
+            if (_currentMapData.geojson) {
+                L.geoJSON(_currentMapData.geojson, {
+                    style: { color: '#1976d2', weight: 1.5, opacity: 0.6, fillOpacity: 0.2 },
+                    pointToLayer: (f, ll) => L.circleMarker(ll, {
+                        radius: 4, fillColor: '#1976d2', color: '#fff',
+                        weight: 1, opacity: 0.8, fillOpacity: 0.6
+                    })
+                }).addTo(_expState.miniMap);
+                // Use pre-computed bounds from the main map (avoids single-point over-zoom).
+                // Fall back to layer bounds only if no pre-computed bounds exist.
+                if (_currentMapData.bounds) {
+                    _expState.miniMap.fitBounds(_currentMapData.bounds,
+                        { padding: [20, 20], maxZoom: 12 });
+                }
+            } else if (_currentMapData.type === 'raster_extent' && _currentMapData.bounds) {
+                if (_currentMapData.thumbnail) {
+                    L.imageOverlay(
+                        `data:image/png;base64,${_currentMapData.thumbnail}`,
+                        _currentMapData.bounds, { opacity: 0.7 }
+                    ).addTo(_expState.miniMap);
+                }
+                L.rectangle(_currentMapData.bounds, {
+                    color: '#1976d2', weight: 1.5, fill: false, dashArray: '4,3'
+                }).addTo(_expState.miniMap);
+                _expState.miniMap.fitBounds(_currentMapData.bounds,
+                    { padding: [20, 20], maxZoom: 12 });
+            }
+        }
+
+        _expState.markerLayer = L.layerGroup().addTo(_expState.miniMap);
+        _expState.drawLayer   = new L.FeatureGroup().addTo(_expState.miniMap);
+        setTimeout(() => _expState.miniMap.invalidateSize(), 200);
+        _refreshMiniMapMode(_expState.spatialMode);
+    }
+
+    function _clearFilterLayers() {
+        if (_expState.filterShapeLayer) {
+            _expState.miniMap.removeLayer(_expState.filterShapeLayer);
+            _expState.filterShapeLayer = null;
+        }
+        if (_expState.highlightLayer) {
+            _expState.miniMap.removeLayer(_expState.highlightLayer);
+            _expState.highlightLayer = null;
+        }
+    }
+
+    function _updateFilterPreview() {
+        if (!_expState.miniMap || !window.turf) return;
+        _clearFilterLayers();
+
+        let filterGeom = null;   // turf GeoJSON feature
+
+        if (_expState.spatialMode === 'buffer' && _expState.bufferCenter) {
+            const km = parseFloat(document.getElementById('expRadius').value) || 5;
+            const pt = turf.point([_expState.bufferCenter.lng, _expState.bufferCenter.lat]);
+            filterGeom = turf.buffer(pt, km, { units: 'kilometers' });
+            // Draw the circle as a GeoJSON polygon overlay
+            _expState.filterShapeLayer = L.geoJSON(filterGeom, {
+                style: { color: '#e65100', weight: 2, fillOpacity: 0.12, fillColor: '#e65100' }
+            }).addTo(_expState.miniMap);
+        } else if (_expState.spatialMode === 'polygon' && _expState.drawnShape) {
+            filterGeom = turf.feature(_expState.drawnShape);
+            _expState.filterShapeLayer = L.geoJSON(filterGeom, {
+                style: { color: '#e65100', weight: 2, fillOpacity: 0.12, fillColor: '#e65100' }
+            }).addTo(_expState.miniMap);
+        }
+
+        // Highlight features inside the filter zone
+        if (filterGeom && _currentMapData && _currentMapData.geojson) {
+            try {
+                const selected = { type: 'FeatureCollection', features: [] };
+                const fc = _currentMapData.geojson;
+                (fc.features || []).forEach(f => {
+                    try {
+                        if (turf.booleanIntersects(f, filterGeom)) selected.features.push(f);
+                    } catch (_) {}
+                });
+                if (selected.features.length > 0) {
+                    _expState.highlightLayer = L.geoJSON(selected, {
+                        style:        { color: '#f57f17', weight: 2, fillOpacity: 0.7 },
+                        pointToLayer: (f, ll) => L.circleMarker(ll, {
+                            radius: 6, fillColor: '#f57f17', color: '#e65100',
+                            weight: 1.5, opacity: 1, fillOpacity: 0.9
+                        })
+                    }).addTo(_expState.miniMap);
+                }
+            } catch (_) {}
+        }
+    }
+
+    function _refreshMiniMapMode(mode) {
+        if (!_expState.miniMap) return;
+        if (_expState._drawControl) {
+            _expState.miniMap.removeControl(_expState._drawControl);
+            _expState._drawControl = null;
+        }
+        _expState.miniMap.off('click');
+        _expState.miniMap.off(L.Draw.Event.CREATED);
+        _expState.drawLayer.clearLayers();
+        _expState.markerLayer.clearLayers();
+        _clearFilterLayers();
+
+        if (mode === 'buffer') {
+            _expState.miniMap.on('click', e => {
+                _expState.bufferCenter = e.latlng;
+                _expState.markerLayer.clearLayers();
+                L.circleMarker(e.latlng, {radius: 6, color: '#1565c0', fillOpacity: 0.9})
+                 .addTo(_expState.markerLayer);
+                _updateFilterPreview();
+            });
+        } else if (mode === 'polygon') {
+            const dc = new L.Control.Draw({
+                draw: { polygon: true, rectangle: true, circle: false,
+                        marker: false, polyline: false, circlemarker: false },
+                edit: { featureGroup: _expState.drawLayer }
+            });
+            _expState._drawControl = dc;
+            _expState.miniMap.addControl(dc);
+            _expState.miniMap.on(L.Draw.Event.CREATED, e => {
+                _expState.drawLayer.clearLayers();
+                _expState.drawLayer.addLayer(e.layer);
+                _expState.drawnShape = e.layer.toGeoJSON().geometry;
+                _updateFilterPreview();
+            });
+        }
+        _expState.miniMap.invalidateSize();
+    }
+
+    // ── Run export ────────────────────────────────────────────────────────
+    async function runExport() {
+        if (!_expState.selectedFmt) {
+            alert(UI.export_fmt_section + '?'); return;
+        }
+        const btn = document.getElementById('expRunBtn');
+        btn.disabled = true;
+        btn.textContent = UI.export_running;
+
+        // Collect selected columns / bands
+        const cbs = [...document.querySelectorAll('.exp-col-cb')];
+        const allChecked = document.getElementById('expColAll').checked;
+        const selectedItems = allChecked ? null : cbs.filter(c=>c.checked).map(c=>
+            _expState.isRaster ? parseInt(c.value) : c.value);
+
+        // Value filters (with operator)
+        const vfRows = [...document.querySelectorAll('.exp-vf-row')];
+        const valFilters = vfRows.map(r => ({
+            column:   r.querySelector('.exp-vf-col').value,
+            operator: r.querySelector('.exp-vf-op').value,
+            value:    r.querySelector('.exp-vf-val').value,
+        })).filter(f => f.column && f.value !== '');
+
+        // Temporal filter
+        let timeFilter = null;
+        if (_expState.dateInfo && document.getElementById('expTimeSection').style.display !== 'none') {
+            timeFilter = {
+                column:     document.getElementById('expTimeCol').value,
+                date_start: document.getElementById('expTimeFrom').value || null,
+                date_end:   document.getElementById('expTimeTo').value   || null,
+            };
+        }
+
+        // Spatial filter
+        let spatialFilter = null;
+        if (_expState.spatialMode === 'buffer' && _expState.bufferCenter) {
+            spatialFilter = {
+                type:      'buffer',
+                lat:       _expState.bufferCenter.lat,
+                lon:       _expState.bufferCenter.lng,
+                radius_km: parseFloat(document.getElementById('expRadius').value) || 5,
+            };
+        } else if (_expState.spatialMode === 'polygon' && _expState.drawnShape) {
+            spatialFilter = { type: 'polygon', geojson: _expState.drawnShape };
+        }
+
+        const body = {
+            format:         _expState.selectedFmt,
+            columns:        _expState.isRaster ? null   : selectedItems,
+            bands:          _expState.isRaster ? selectedItems : null,
+            value_filters:  valFilters,
+            time_filter:    timeFilter,
+            spatial_filter: spatialFilter,
+        };
+
+        try {
+            const resp = await fetch('/export_filtered', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(body),
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({error: `HTTP ${resp.status}`}));
+                alert(err.error || 'Export failed.');
+                return;
+            }
+            // Trigger download
+            const blob = await resp.blob();
+            const cd   = resp.headers.get('Content-Disposition') || '';
+            const fnMatch = cd.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+            const filename = fnMatch ? fnMatch[1].replace(/['"]/g,'') : `export.${_expState.selectedFmt}`;
+            const url  = URL.createObjectURL(blob);
+            const a    = document.createElement('a');
+            a.href = url; a.download = filename; a.click();
+            URL.revokeObjectURL(url);
+            closeExportModal();
+        } catch(e) {
+            alert('Connection error: ' + e.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = UI.export_run;
+        }
+    }
     </script>
 </body>
 </html>
