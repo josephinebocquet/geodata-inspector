@@ -1731,41 +1731,54 @@ def compute_occupancy_curve(conn, table_name, col_start, col_end, n_buckets=100,
             result["col_end"] = col_end
         return result
 
-    # --- Build bucket time axis ---
-    step_days = max(1, coverage_days // n_buckets)
+    # --- Build one bucket per period and count intersecting intervals ---
+    unit_interval = {'year': 'YEAR', 'month': 'MONTH', 'day': 'DAY'}[unit]
+    t_min_iso = t_min.isoformat()[:10]
+    t_max_iso = t_max.isoformat()[:10]
+    if unit == 'year':
+        t_min_trunc = f"{t_min_iso[:4]}-01-01"
+        n_periods   = int(t_max_iso[:4]) - int(t_min_iso[:4]) + 2
+    elif unit == 'month':
+        t_min_trunc = f"{t_min_iso[:7]}-01"
+        import datetime as _dt_occ
+        _d1 = _dt_occ.date.fromisoformat(t_min_trunc)
+        _d2 = _dt_occ.date.fromisoformat(f"{t_max_iso[:7]}-01")
+        n_periods = (_d2.year - _d1.year) * 12 + (_d2.month - _d1.month) + 2
+    else:
+        t_min_trunc = t_min_iso
+        n_periods   = coverage_days + 2
 
     conn.execute(f"""
         CREATE OR REPLACE TEMP TABLE _time_axis AS
-        SELECT
-            TIMESTAMP '{t_min.isoformat()}' + (INTERVAL 1 DAY * CAST(generate_series * {step_days} AS BIGINT)) AS bucket_ts
-        FROM generate_series(0, {n_buckets})
+        SELECT TIMESTAMP '{t_min_trunc}' +
+               (INTERVAL 1 {unit_interval} * CAST(generate_series AS BIGINT)) AS bucket_start
+        FROM generate_series(0, {n_periods})
     """)
 
-    # --- Count active rows per bucket ---
     conn.execute(f"""
         CREATE OR REPLACE TEMP TABLE _occupancy AS
         SELECT
-            a.bucket_ts,
+            a.bucket_start,
             COUNT(d."{col_start}") AS active_count
         FROM _time_axis a
         LEFT JOIN {table_name} d
-            ON {ts(col_start)} <= a.bucket_ts
-           AND {ts(col_end)}   >= a.bucket_ts
+            ON {ts(col_start)} < a.bucket_start + INTERVAL 1 {unit_interval}
+           AND {ts(col_end)}   >= a.bucket_start
            AND d."{col_start}" IS NOT NULL
            AND d."{col_end}"   IS NOT NULL
            AND YEAR({ts(col_start)}) >= 1800
            AND YEAR({ts(col_end)})   >= 1800
-        GROUP BY a.bucket_ts
-        ORDER BY a.bucket_ts
+        GROUP BY a.bucket_start
+        ORDER BY a.bucket_start
     """)
 
-    rows = conn.execute("SELECT bucket_ts, active_count FROM _occupancy").fetchall()
+    rows = conn.execute("SELECT bucket_start, active_count FROM _occupancy").fetchall()
 
     conn.execute("DROP TABLE IF EXISTS _time_axis")
     conn.execute("DROP TABLE IF EXISTS _occupancy")
 
     buckets = [
-        {"t": row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0]),
+        {"t": row[0].isoformat()[:10] if hasattr(row[0], "isoformat") else str(row[0])[:10],
          "count": int(row[1])}
         for row in rows
     ]
@@ -2007,40 +2020,23 @@ def _store_raw_temporal(conn, table_name, date_cols, raw_formats, interval_pairs
             if not ext or ext[0] is None:
                 continue
             t_min, t_max = ext
-            cov_days = (t_max - t_min).days if hasattr(t_max - t_min, "days") else 0
-            n_pts = min(500, max(30, cov_days))
-            step = max(1, cov_days // n_pts)
-
-            conn.execute(f"""
-                CREATE OR REPLACE TEMP TABLE _raw_tax AS
-                SELECT TIMESTAMP '{t_min.isoformat()}' +
-                       (INTERVAL 1 DAY * CAST(generate_series * {step} AS BIGINT)) AS bucket_ts
-                FROM generate_series(0, {n_pts})
-            """)
-            conn.execute(f"""
-                CREATE OR REPLACE TEMP TABLE _raw_occ AS
-                SELECT a.bucket_ts, COUNT(d."{col_s}") AS active_count
-                FROM _raw_tax a
-                LEFT JOIN {table_name} d
-                    ON {te_s} <= a.bucket_ts AND {te_e} >= a.bucket_ts
-                   AND d."{col_s}" IS NOT NULL AND d."{col_e}" IS NOT NULL
-                   AND YEAR({te_s}) >= 1800 AND YEAR({te_e}) >= 1800
-                GROUP BY a.bucket_ts ORDER BY a.bucket_ts
-            """)
-            rows = conn.execute("SELECT bucket_ts, active_count FROM _raw_occ").fetchall()
-            conn.execute("DROP TABLE IF EXISTS _raw_tax")
-            conn.execute("DROP TABLE IF EXISTS _raw_occ")
-
             key = f"{col_s}||{col_e}"
             last_dt_raw["intervals"][key] = {
                 "col_start":  col_s,
                 "col_end":    col_e,
                 "global_min": t_min.isoformat(),
                 "global_max": t_max.isoformat(),
-                "step_days":  step,
-                "data": [
-                    (r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0]), int(r[1]))
-                    for r in rows
+                # Store raw interval endpoints so recompute can do period-intersection counts
+                "raw_intervals": [
+                    (r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0]),
+                     r[1].isoformat() if hasattr(r[1], "isoformat") else str(r[1]))
+                    for r in conn.execute(f"""
+                        SELECT {te_s}, {te_e}
+                        FROM {table_name}
+                        WHERE "{col_s}" IS NOT NULL AND "{col_e}" IS NOT NULL
+                          AND YEAR({te_s}) >= 1800 AND YEAR({te_e}) >= 1800
+                    """).fetchall()
+                    if r[0] is not None and r[1] is not None
                 ],
             }
         except Exception as exc:
@@ -2134,17 +2130,43 @@ def recompute_temporal_charts(columns=None, date_start=None, date_end=None, gran
         cov = (eff_e - eff_s).days if (eff_s and eff_e) else 0
         tgt = granularity or _auto_gran(cov)
 
-        # Occupancy: take MAX within aggregation period (curve shows count-at-time-t)
+        # Occupancy: count distinct intervals that intersect each period bucket
         acc = defaultdict(int)
-        for date_str, count in raw.get("data", []):
-            d = _parse(date_str)
-            if d is None or (eff_s and d < eff_s) or (eff_e and d > eff_e):
+        for start_str, end_str in raw.get("raw_intervals", []):
+            iv_s = _parse(start_str)
+            iv_e = _parse(end_str)
+            if iv_s is None or iv_e is None:
                 continue
-            key = (f"{d.year}-01-01" if tgt == "year"
-                   else f"{d.year}-{d.month:02d}-01" if tgt == "month"
-                   else date_str[:10])
-            if count > acc[key]:
-                acc[key] = count
+            cur  = iv_s if not eff_s or iv_s >= eff_s else eff_s
+            stop = iv_e if not eff_e or iv_e <= eff_e else eff_e
+            if cur > stop:
+                continue
+            if tgt == 'year':
+                cur_k  = datetime.date(cur.year, 1, 1)
+                stop_k = datetime.date(stop.year, 1, 1)
+                bound_s = datetime.date(eff_s.year, 1, 1) if eff_s else None
+                bound_e = datetime.date(eff_e.year, 1, 1) if eff_e else None
+                while cur_k <= stop_k:
+                    if (not bound_s or cur_k >= bound_s) and (not bound_e or cur_k <= bound_e):
+                        acc[f"{cur_k.year}-01-01"] += 1
+                    cur_k = datetime.date(cur_k.year + 1, 1, 1)
+            elif tgt == 'month':
+                cur_k  = datetime.date(cur.year, cur.month, 1)
+                stop_k = datetime.date(stop.year, stop.month, 1)
+                bound_s = datetime.date(eff_s.year, eff_s.month, 1) if eff_s else None
+                bound_e = datetime.date(eff_e.year, eff_e.month, 1) if eff_e else None
+                while cur_k <= stop_k:
+                    if (not bound_s or cur_k >= bound_s) and (not bound_e or cur_k <= bound_e):
+                        acc[f"{cur_k.year}-{cur_k.month:02d}-01"] += 1
+                    m = cur_k.month % 12 + 1
+                    y = cur_k.year + (1 if cur_k.month == 12 else 0)
+                    cur_k = datetime.date(y, m, 1)
+            else:  # day
+                cur_k = cur
+                while cur_k <= stop:
+                    if (not eff_s or cur_k >= eff_s) and (not eff_e or cur_k <= eff_e):
+                        acc[cur_k.isoformat()] += 1
+                    cur_k += datetime.timedelta(days=1)
 
         intervals_out.append({
             "col_start":           col_s,
@@ -2289,47 +2311,54 @@ def compute_column_occupancy(filepath, file_ext, date_col, end_date_col=None,
 
         # ── Occupancy curve mode ──────────────────────────────────────────
         if end_date_col:
-            cov_days = (t_max - t_min).days if hasattr(t_max - t_min, 'days') else 365
-            step = max(1, cov_days // n_buckets)
+            unit_interval = {'year': 'YEAR', 'month': 'MONTH', 'day': 'DAY'}.get(granularity, 'MONTH')
+            t_min_iso = t_min.isoformat()[:10]
+            t_max_iso = t_max.isoformat()[:10]
+            if granularity == 'year':
+                t_min_trunc = f"{t_min_iso[:4]}-01-01"
+                n_periods   = int(t_max_iso[:4]) - int(t_min_iso[:4]) + 2
+            elif granularity == 'day':
+                t_min_trunc = t_min_iso
+                cov_days    = (t_max - t_min).days if hasattr(t_max - t_min, 'days') else 365
+                n_periods   = cov_days + 2
+            else:  # month (default)
+                t_min_trunc = f"{t_min_iso[:7]}-01"
+                import datetime as _dt2
+                _d1 = _dt2.date.fromisoformat(t_min_trunc)
+                _d2 = _dt2.date.fromisoformat(f"{t_max_iso[:7]}-01")
+                n_periods = (_d2.year - _d1.year) * 12 + (_d2.month - _d1.month) + 2
 
             conn.execute(f"""
                 CREATE OR REPLACE TEMP TABLE _tax AS
-                SELECT TIMESTAMP '{t_min.isoformat()}' +
-                       (INTERVAL 1 DAY * CAST(generate_series * {step} AS BIGINT)) AS bucket_ts
-                FROM generate_series(0, {n_buckets})
+                SELECT TIMESTAMP '{t_min_trunc}' +
+                       (INTERVAL 1 {unit_interval} * CAST(generate_series AS BIGINT)) AS bucket_start
+                FROM generate_series(0, {n_periods})
             """)
             conn.execute(f"""
                 CREATE OR REPLACE TEMP TABLE _occ AS
-                SELECT a.bucket_ts, COUNT(d."{date_col}") AS active_count
+                SELECT a.bucket_start, COUNT(d."{date_col}") AS active_count
                 FROM _tax a
                 LEFT JOIN _d d
-                    ON {te_s} <= a.bucket_ts
-                   AND {te_e} >= a.bucket_ts
+                    ON {te_s} < a.bucket_start + INTERVAL 1 {unit_interval}
+                   AND {te_e} >= a.bucket_start
                    AND d."{date_col}" IS NOT NULL AND d."{end_date_col}" IS NOT NULL
                    AND YEAR({te_s}) >= 1800 AND YEAR({te_e}) >= 1800
                    {val_join_cond}
-                GROUP BY a.bucket_ts ORDER BY a.bucket_ts
+                GROUP BY a.bucket_start ORDER BY a.bucket_start
             """)
 
-            # Apply date range filter
             range_conds = []
-            if date_start: range_conds.append(f"bucket_ts >= TIMESTAMP '{date_start} 00:00:00'")
-            if date_end:   range_conds.append(f"bucket_ts <= TIMESTAMP '{date_end} 23:59:59'")
+            if date_start: range_conds.append(f"bucket_start >= TIMESTAMP '{date_start} 00:00:00'")
+            if date_end:   range_conds.append(f"bucket_start <= TIMESTAMP '{date_end} 23:59:59'")
             where_str = ('WHERE ' + ' AND '.join(range_conds)) if range_conds else ''
-            occ_rows = conn.execute(f"SELECT bucket_ts, active_count FROM _occ {where_str}").fetchall()
+            occ_rows = conn.execute(f"SELECT bucket_start, active_count FROM _occ {where_str}").fetchall()
             conn.execute("DROP TABLE IF EXISTS _tax; DROP TABLE IF EXISTS _occ")
 
-            # Re-aggregate to requested granularity (take max per bucket for occupancy curve)
-            acc = defaultdict(int)
-            for r in occ_rows:
-                d = r[0]
-                if d is None: continue
-                if granularity == 'year':   k = f"{d.year}-01-01"
-                elif granularity == 'month': k = f"{d.year}-{d.month:02d}-01"
-                else:                       k = d.isoformat()[:10]
-                if int(r[1]) > acc[k]: acc[k] = int(r[1])
-
-            buckets = [{"t": k, "count": v} for k, v in sorted(acc.items())]
+            buckets = [
+                {"t": r[0].isoformat()[:10] if hasattr(r[0], 'isoformat') else str(r[0])[:10],
+                 "count": int(r[1])}
+                for r in occ_rows if r[0] is not None
+            ]
             chart_type = "occupancy"
 
         # ── Histogram mode ────────────────────────────────────────────────

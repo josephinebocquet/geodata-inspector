@@ -1843,8 +1843,8 @@ def request_too_large(e):
 
 if __name__ == "__main__":
     _server = _cfg.get("server", {})
-    _host   = _server.get("host", "localhost")
-    _port   = int(_server.get("port", 5050))
+    _host   = os.environ.get("HOST", _server.get("host", "localhost"))
+    _port   = int(os.environ.get("PORT", _server.get("port", 5050)))
     _debug  = bool(_server.get("debug", False))
     print("=" * 70)
     print("Geodata Inspector - DuckDB-Optimized Version")

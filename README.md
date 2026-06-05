@@ -16,9 +16,19 @@ A high-performance geodata inspection tool using DuckDB for fast CSV/Excel proce
 
 ## Installation
 
-### Option 1 — Conda (recommended)
+### Option 1 — Docker (recommended for deployment)
 
 ```bash
+git clone https://github.com/josephinebocquet/geodata-inspector.git
+cd geodata-inspector
+docker compose up --build
+```
+
+
+### Option 2 — Conda 
+
+```bash
+git clone https://github.com/josephinebocquet/geodata-inspector.git
 # Create and populate the environment from the lock file
 conda env create -f environment.yml
 
@@ -32,7 +42,7 @@ To update an existing environment after changes to `environment.yml`:
 conda env update -f environment.yml --prune
 ```
 
-### Option 2 — pip only
+### Option 3 — pip only
 
 ```bash
 pip install -r requirements.txt

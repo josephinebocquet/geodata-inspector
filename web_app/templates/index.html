@@ -6,7 +6,6 @@
     <title>{{ UI.page_title }}</title>
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='geodataInspectorLOGO.svg') }}">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css" />
     <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
@@ -257,40 +256,6 @@
             cursor: pointer; font-size: 0.85rem; font-weight: 500;
         }
         .result-download-btn:hover { background: #004d40; }
-
-        /* Spatial filter Leaflet control */
-        .sfilt-ctrl {
-            background: white; border-radius: 4px;
-            box-shadow: 0 1px 5px rgba(0,0,0,0.35); overflow: hidden;
-        }
-        .sfilt-ctrl-btn {
-            display: flex; align-items: center; gap: 0.45rem;
-            width: 100%; padding: 6px 9px;
-            background: #e65100; color: #fff;
-            border: none; cursor: pointer; font-size: 0.78rem; font-weight: 600;
-            white-space: nowrap;
-        }
-        .sfilt-ctrl-btn:hover { background: #bf360c; }
-        .sfilt-ctrl-btn.has-filter { background: #2e7d32; }
-        .sfilt-ctrl-btn.has-filter:hover { background: #1b5e20; }
-        .sfilt-ctrl-body { padding: 0.45rem 0.6rem; border-top: 1px solid #f0f0f0; }
-        .sfilt-mode-row { display: flex; gap: 0.3rem; margin-bottom: 0.4rem; }
-        .sfilt-tab {
-            padding: 0.15rem 0.5rem; border: 1px solid #b0bec5; border-radius: 3px;
-            background: #fff; color: #455a64; font-size: 0.72rem; cursor: pointer;
-        }
-        .sfilt-tab.active { background: #e65100; color: #fff; border-color: #e65100; }
-        .sfilt-tab-clear {
-            margin-left: auto; background: none; border: none;
-            color: #e53935; cursor: pointer; font-size: 0.78rem; padding: 0 0.2rem;
-        }
-        .sfilt-buf-row { display: flex; align-items: center; gap: 0.4rem; }
-        .sfilt-radius-inp {
-            width: 48px; padding: 0.15rem 0.3rem; border: 1px solid #b0bec5;
-            border-radius: 3px; font-size: 0.72rem;
-        }
-        .sfilt-hint { font-size: 0.68rem; color: #78909c; margin-top: 0.3rem; max-width: 170px; }
-        .sfilt-status { font-size: 0.72rem; color: #2e7d32; font-weight: 600; margin-top: 0.25rem; }
 
         /* Export trigger button */
         .export-section { margin-top: 1rem; display: none; }
@@ -737,8 +702,10 @@
         </div>
     </div>
 
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+
     <script>
         const UI = {{ UI | tojson }};
         const dropZone       = document.getElementById('dropZone');
@@ -1643,218 +1610,10 @@
         }
 
         // ── Preview ───────────────────────────────────────────────────────
-        // ── Main-map spatial filter (Leaflet custom control) ─────────────
-        let _mainSpatialMode   = 'buffer';
-        let _mainSpatialFilter = null;
-        let _mainSpatialLayer  = null;
-        let _mainDrawFG        = null;
-        let _mainDrawCtrl      = null;
-        let _mainBufCenter     = null;
-        let _mainSfiltControl  = null;   // Leaflet control instance
-
-        // Build and add the control to the main map
-        function _addSpatialFilterControl() {
-            if (_mainSfiltControl) { map.removeControl(_mainSfiltControl); _mainSfiltControl = null; }
-
-            _mainSfiltControl = L.control({ position: 'topleft' });
-            _mainSfiltControl.onAdd = function () {
-                const wrap = L.DomUtil.create('div', 'sfilt-ctrl');
-
-                // Header button
-                const btn = L.DomUtil.create('button', 'sfilt-ctrl-btn', wrap);
-                btn.id        = 'sfiltCtrlBtn';
-                btn.innerHTML = `🔍 ${UI.sfilt_title || 'Filtre spatial'}`;
-                L.DomEvent.on(btn, 'click', L.DomEvent.stopPropagation);
-                L.DomEvent.on(btn, 'click', () => _toggleSfiltBody(wrap));
-
-                // Body (collapsed by default)
-                const body = L.DomUtil.create('div', 'sfilt-ctrl-body', wrap);
-                body.id           = 'sfiltCtrlBody';
-                body.style.display = 'none';
-                body.innerHTML = `
-                    <div class="sfilt-mode-row">
-                        <button class="sfilt-tab active" id="sfiltBufTab"
-                                onclick="setMainSpatialMode('buffer')">
-                            ${UI.sfilt_buffer || 'Zone tampon'}</button>
-                        <button class="sfilt-tab" id="sfiltPolyTab"
-                                onclick="setMainSpatialMode('polygon')">
-                            ${UI.sfilt_polygon || 'Polygone'}</button>
-                        <button class="sfilt-tab-clear" title="${UI.sfilt_clear || 'Effacer'}"
-                                onclick="clearMainSpatialFilter()">✕</button>
-                    </div>
-                    <div class="sfilt-buf-row" id="sfiltBufferCtrl">
-                        <span style="font-size:0.72rem;">${UI.sfilt_radius || 'Rayon'}</span>
-                        <input type="number" id="sfiltRadius" class="sfilt-radius-inp"
-                               value="5" min="0.1" step="0.5"
-                               oninput="_onMainRadiusChange()">
-                        <span style="font-size:0.7rem; color:#90a4ae;">km</span>
-                    </div>
-                    <div class="sfilt-hint" id="sfiltHint"></div>
-                    <div class="sfilt-status" id="sfiltStatus"></div>`;
-
-                // Prevent map clicks inside the body from propagating
-                L.DomEvent.disableClickPropagation(wrap);
-                L.DomEvent.disableScrollPropagation(wrap);
-                return wrap;
-            };
-            _mainSfiltControl.addTo(map);
-            // Initialise mode display after DOM is ready
-            setTimeout(() => setMainSpatialMode('buffer'), 0);
-        }
-
-        function _toggleSfiltBody(wrap) {
-            const body = wrap.querySelector('#sfiltCtrlBody');
-            const open = body.style.display !== 'none';
-            body.style.display = open ? 'none' : '';
-            if (!open) {
-                _initMainDrawFG();
-                setMainSpatialMode(_mainSpatialMode);
-            }
-        }
-
-        function setMainSpatialMode(mode) {
-            _mainSpatialMode = mode;
-            const bufTab  = document.getElementById('sfiltBufTab');
-            const polyTab = document.getElementById('sfiltPolyTab');
-            const bufCtrl = document.getElementById('sfiltBufferCtrl');
-            const hint    = document.getElementById('sfiltHint');
-            if (!bufTab) return;
-            bufTab.classList.toggle('active',  mode === 'buffer');
-            polyTab.classList.toggle('active', mode === 'polygon');
-            bufCtrl.style.display = mode === 'buffer' ? 'flex' : 'none';
-            hint.textContent = mode === 'buffer'
-                ? (UI.sfilt_buf_hint  || 'Cliquez sur la carte pour définir le centre')
-                : (UI.sfilt_poly_hint || 'Utilisez les outils de dessin');
-            _setupMainMapInteraction(mode);
-        }
-
-        function _initMainDrawFG() {
-            if (!map || _mainDrawFG) return;
-            _mainDrawFG = new L.FeatureGroup().addTo(map);
-        }
-
-        function _setupMainMapInteraction(mode) {
-            if (!map) return;
-            if (_mainDrawCtrl) { map.removeControl(_mainDrawCtrl); _mainDrawCtrl = null; }
-            map.off('click.sfilt');
-
-            if (mode === 'buffer') {
-                map.on('click.sfilt', e => { _mainBufCenter = e.latlng; _updateMainFilter(); });
-            } else {
-                if (!_mainDrawFG) _initMainDrawFG();
-                _mainDrawFG.clearLayers();
-                _mainDrawCtrl = new L.Control.Draw({
-                    draw: { polygon: true, rectangle: true, circle: false,
-                            marker: false, polyline: false, circlemarker: false },
-                    edit: { featureGroup: _mainDrawFG }
-                });
-                map.addControl(_mainDrawCtrl);
-                map.on(L.Draw.Event.CREATED, e => {
-                    _mainDrawFG.clearLayers();
-                    _mainDrawFG.addLayer(e.layer);
-                    _mainSpatialFilter = { type: 'polygon', geojson: e.layer.toGeoJSON().geometry };
-                    _applyMainFilter();
-                });
-            }
-        }
-
-        function _onMainRadiusChange() { if (_mainBufCenter) _updateMainFilter(); }
-
-        function _updateMainFilter() {
-            if (_mainSpatialLayer) { map.removeLayer(_mainSpatialLayer); _mainSpatialLayer = null; }
-            if (!_mainBufCenter) return;
-            const km = parseFloat(document.getElementById('sfiltRadius')?.value) || 5;
-
-            if (window.turf) {
-                const buf = turf.buffer(turf.point([_mainBufCenter.lng, _mainBufCenter.lat]),
-                                        km, { units: 'kilometers' });
-                _mainSpatialLayer = L.geoJSON(buf, {
-                    style: { color: '#e65100', weight: 2, fillOpacity: 0.15, fillColor: '#e65100' }
-                }).addTo(map);
-            } else {
-                _mainSpatialLayer = L.circle(_mainBufCenter, {
-                    radius: km * 1000, color: '#e65100', weight: 2, fillOpacity: 0.15
-                }).addTo(map);
-            }
-            _mainSpatialFilter = { type: 'buffer', lat: _mainBufCenter.lat,
-                                   lon: _mainBufCenter.lng, radius_km: km };
-            // Tint the control button to show filter is active
-            const btn = document.getElementById('sfiltCtrlBtn');
-            if (btn) btn.classList.add('has-filter');
-            _applyMainFilter();
-        }
-
-        async function _applyMainFilter() {
-            if (!_mainSpatialFilter) return;
-            previewTableWrap.innerHTML = '';
-            if (previewSection.style.display !== 'none') await _loadFilteredPreview();
-        }
-
-        function clearMainSpatialFilter() {
-            if (_mainSpatialLayer) { map.removeLayer(_mainSpatialLayer); _mainSpatialLayer = null; }
-            if (_mainDrawFG)       { _mainDrawFG.clearLayers(); }
-            if (_mainDrawCtrl)     { map.removeControl(_mainDrawCtrl); _mainDrawCtrl = null; }
-            if (map)               { map.off('click.sfilt'); }
-            _mainSpatialFilter = null; _mainBufCenter = null; _mainDrawFG = null;
-            const btn = document.getElementById('sfiltCtrlBtn');
-            if (btn) btn.classList.remove('has-filter');
-            const st = document.getElementById('sfiltStatus');
-            if (st) st.textContent = '';
-            // Collapse the control body
-            const body = document.getElementById('sfiltCtrlBody');
-            if (body) body.style.display = 'none';
-            previewTableWrap.innerHTML = '';
-            previewBtn.textContent = UI.preview_btn;
-        }
-
-        async function _loadFilteredPreview() {
-            previewBtn.textContent = UI.preview_loading;
-            previewBtn.disabled = true;
-            try {
-                const resp = await fetch('/preview_filtered', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ spatial_filter: _mainSpatialFilter })
-                });
-                const data = await resp.json();
-                if (data.error) {
-                    previewTableWrap.innerHTML = `<p style="color:#c62828">${data.error}</p>`;
-                } else {
-                    // Count badge
-                    document.getElementById('sfiltStatus').textContent =
-                        `${data.total_filtered} / ${data.total_before} ${UI.sfilt_rows_match || 'lignes sélectionnées'}`;
-                    let html = '<table class="preview-table"><thead><tr>';
-                    data.columns.forEach(c => { html += `<th title="${c}">${c}</th>`; });
-                    html += '</tr></thead><tbody>';
-                    data.rows.forEach(row => {
-                        html += '<tr>';
-                        row.forEach(v => {
-                            const d = v !== null && v !== undefined ? String(v) : '';
-                            html += `<td title="${d}">${d}</td>`;
-                        });
-                        html += '</tr>';
-                    });
-                    html += '</tbody></table>';
-                    previewTableWrap.innerHTML = html;
-                }
-            } catch(e) {
-                previewTableWrap.innerHTML = `<p style="color:#c62828">${e.message}</p>`;
-            } finally {
-                previewBtn.textContent = UI.preview_btn;
-                previewBtn.disabled = false;
-            }
-        }
-
         async function loadPreview() {
             if (previewTableWrap.innerHTML !== '') {
                 previewTableWrap.innerHTML = '';
                 previewBtn.textContent = UI.preview_btn;
-                return;
-            }
-            // Use filtered preview if a spatial filter is active
-            if (_mainSpatialFilter) {
-                previewSection.style.display = 'block';
-                await _loadFilteredPreview();
                 return;
             }
             previewBtn.textContent = UI.preview_loading;
@@ -2079,9 +1838,6 @@
             document.getElementById('crsOverridePanel').style.display = 'block';
             document.getElementById('remapStatus').textContent = '';
             // Add spatial filter control for vector data with geometry
-            const hasSfilt = !_currentMapIsRaster && !!mapData.geojson;
-            if (hasSfilt) { _addSpatialFilterControl(); }
-            else { clearMainSpatialFilter(); }
         }
 
 // ── Batch processing ──────────────────────────────────────────────
@@ -2156,7 +1912,6 @@
             document.getElementById('crsOverridePanel').style.display = 'none';
             document.getElementById('crsInput').value = '';
             document.getElementById('remapStatus').textContent = '';
-            clearMainSpatialFilter();
             previewSection.style.display = 'none';
             previewTableWrap.innerHTML = '';
             document.getElementById('resultDownloadBtn').style.display = 'none';
