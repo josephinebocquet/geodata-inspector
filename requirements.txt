@@ -5,6 +5,7 @@
 duckdb>=0.9.0
 pandas>=2.0.0
 numpy>=1.24.0
+pyyaml>=6.0
 
 # Geospatial libraries
 geopandas>=0.14.0
@@ -18,17 +19,14 @@ python-calamine>=0.1.0  # Fast Excel reading
 chardet>=5.0.0         # Character encoding detection
 clevercsv>=0.8.0       # Smart CSV dialect detection
 pyarrow>=14.0.0        # GeoParquet export
-rasterio>=1.3.0        # Raster file reading (GeoTIFF, IMG, JP2, ASC, HGT)
+rasterio>=1.3.0        # Raster file reading (GeoTIFF, IMG, JP2, ASC, HGT, NetCDF)
 Pillow>=10.0.0         # Raster thumbnail generation
 
 # Web application
 flask>=3.0.0
+gunicorn>=21.0.0       # Production WSGI server
 
 # Spatial operations (optional but recommended)
 rtree>=1.0.0           # Spatial indexing
 libpysal>=4.9.0        # Spatial weights for Moran's I
 esda>=2.5.0            # Exploratory spatial data analysis
-
-# Note: DuckDB spatial extension is installed automatically on first use
-# via: conn.execute("INSTALL spatial; LOAD spatial;")
-python-calamine>=0.1.0

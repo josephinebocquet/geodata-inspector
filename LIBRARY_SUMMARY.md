@@ -12,14 +12,15 @@ geodata_inspector/
 ├── setup.py
 ├── requirements.txt
 ├── pyproject.toml
-├── MANIFEST
-├── LICENCE
+├── MANIFEST.in
+├── LICENSE
 ├── examples/
 │   └── example_usage.py
 ├── geodata_inspector/              ← Python package
 │   ├── __init__.py
 │   ├── core.py                     ← Core inspection logic (DuckDB)
-│   ├── metadata.py                 ← MetadataExtractor library (this file)
+│   ├── metadata.py                 ← MetadataExtractor library
+│   ├── raster.py                   ← Raster inspection (rasterio-based)
 │   └── spatial.py                  ← Spatial analysis functions
 ├── reference_file/                 ← Reference boundaries (one per country)
 │   ├── fr_regions.geojson

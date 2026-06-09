@@ -64,7 +64,9 @@ else:
     gdf_reference = None
     
 
-PREVIEW_DIR = tempfile.mkdtemp(prefix="geodata_preview_")
+_preview_dir_env = os.environ.get("GEODATA_PREVIEW_DIR")
+PREVIEW_DIR = _preview_dir_env if _preview_dir_env and os.path.isdir(_preview_dir_env) \
+              else tempfile.mkdtemp(prefix="geodata_preview_")
 last_preview_path = {"path": None, "ext": None}
 
 # Batch processing state

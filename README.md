@@ -1,18 +1,20 @@
 # Geodata Inspector
 
-A high-performance geodata inspection tool using DuckDB for fast CSV/Excel processing and comprehensive spatial analysis. Available as a web application and a Python library.
+A high-performance geodata inspection tool using DuckDB for fast processing and comprehensive spatial analysis. Supports tabular, vector, and raster geospatial files. Available as a web application and a Python library.
 
 ## Features
 
-- **Multi-format Support**: CSV, TXT, Excel (.xlsx), GeoJSON, Shapefile, GeoPackage, ZIP
-- **Automatic Geometry Detection**: Points, LineStrings, Polygons, WKT, GeoJSON, native geometry columns
-- **CRS Detection**: Automatically detects coordinate reference systems; area and density always computed in km² regardless of source CRS
+- **Multi-format Support**: CSV, TXT, Excel (.xlsx), GeoJSON, Shapefile, GeoPackage, ZIP (vector/tabular) — GeoTIFF, ERDAS Imagine, JPEG 2000, Arc ASCII Grid, SRTM HGT, NetCDF (raster)
+- **Automatic Geometry Detection**: Points, LineStrings, Polygons, WKT, GeoJSON, native geometry columns, lat/lon pairs
+- **Raster Inspection**: Per-band statistics (min/max/mean/std/fill), cell resolution, WGS84 extent, thumbnail preview, NetCDF subdataset handling
+- **CRS Detection**: Automatically detects coordinate reference systems; area and density always computed in km² regardless of source CRS; manual CRS override available on the map
 - **Multi-country Support**: Built-in reference files and geographic key patterns for France, UK, Germany, Italy, Spain, USA, and Europe (NUTS)
 - **Spatial Metrics**: Area, density, coverage, complexity, duplicates, fill rate
 - **Temporal Analysis**: Automatic detection of date columns with interactive occupancy curves and histograms; filter by date range, column selection, and granularity (year/month/day)
 - **Bilingual Interface**: French/English with hover tooltips (ⓘ) explaining each metric
-- **Batch Processing**: Process directories or ZIP archives via the web UI or library
-- **Multiple Export Formats**: GeoJSON, GeoPackage, Shapefile, CSV+WKT
+- **Batch Processing**: Process directories or ZIP archives via the web UI or library; both ZIP upload and folder picker supported; stop button to interrupt
+- **Advanced Export**: GeoJSON, GeoPackage, Shapefile, GeoParquet, CSV+WKT (vector) — GeoTIFF, NetCDF, JPEG 2000, ERDAS Imagine, ASCII Grid (raster); with column selection, value filters, temporal filter, and spatial filter (buffer or drawn polygon)
+- **Data Preview**: 10-row data preview, with optional spatial filter applied
 
 ## Installation
 
@@ -24,8 +26,9 @@ cd geodata-inspector
 docker compose up --build
 ```
 
+The `HOST` environment variable controls the bind address inside the container (defaults to `0.0.0.0` when set via Docker).
 
-### Option 2 — Conda 
+### Option 2 — Conda
 
 ```bash
 git clone https://github.com/josephinebocquet/geodata-inspector.git
@@ -60,14 +63,15 @@ geodata_inspector/
 ├── setup.py
 ├── requirements.txt
 ├── pyproject.toml
-├── MANIFEST
-├── LICENCE
+├── MANIFEST.in
+├── LICENSE
 ├── examples/
 │   └── example_usage.py               # Usage examples
 ├── geodata_inspector/                 # Core Python package
 │   ├── __init__.py
 │   ├── core.py                        # Core inspection logic (DuckDB-optimized)
 │   ├── metadata.py                    # MetadataExtractor library
+│   ├── raster.py                      # Raster file inspection (rasterio-based)
 │   └── spatial.py                     # Spatial analysis functions
 ├── reference_file/                    # Reference boundary files (one per country)
 │   ├── fr_regions.geojson
@@ -99,11 +103,14 @@ server:
   host: localhost
   port: 5050
   debug: false
+  max_upload_size_mb: null   # null = no limit; set an integer to cap uploads
 ```
+
+The `HOST` and `PORT` environment variables override the `server.host` and `server.port` config values at runtime (useful for Docker deployments).
 
 ### Supported Countries
 
-The `country` key selects the reference file, metric CRS, geographic bounds, and geographic key patterns automatically. No file path needs to be specified manually.
+The `country` key selects the reference file, metric CRS, geographic bounds, and geographic key patterns automatically.
 
 | `country` | Reference file | Metric CRS | Geographic keys detected |
 |---|---|---|---|
@@ -130,20 +137,55 @@ localisation:
 ### 1. Web Application
 
 ```bash
-cd web_app
-python app.py
+python ./web_app/app.py
 ```
 
 Open the URL shown in the terminal (default: `http://localhost:5050`).
 
-**Features:**
-- Single file inspection with interactive map preview
-- Batch processing (ZIP or folder) with file navigator
-- Export results to CSV/Excel
-- Export geometry to GeoJSON, GeoPackage, Shapefile, or CSV+WKT
-- FR/EN language switch with metric tooltips
+#### Single file inspection
 
-**Supported file formats**: CSV, TXT, XLSX, GeoJSON, JSON, SHP (+ sidecars), GPKG, ZIP
+Upload one file via drag-and-drop or the Browse button. Supported formats:
+
+- **Tabular / Vector**: CSV, TXT, XLSX, GeoJSON, JSON, SHP (+ sidecars .shx/.dbf/.prj), GPKG, ZIP
+- **Raster**: GeoTIFF (.tif/.tiff), ERDAS Imagine (.img), JPEG 2000 (.jp2), Arc ASCII Grid (.asc), SRTM HGT (.hgt), NetCDF (.nc)
+
+After inspection, the UI shows:
+- Metadata and quality metrics
+- Interactive map preview (up to 1 000 records; raster files show the extent rectangle with a thumbnail overlay)
+- Temporal analysis section when date columns are detected
+- 10-row data preview button
+- CRS override widget if the map positioning looks wrong
+
+#### Batch processing
+
+Two modes are available:
+- **ZIP upload**: upload a ZIP archive containing multiple data files; the inspector processes each file and generates a summary CSV/Excel
+- **Folder picker**: select a local folder directly from the browser (uses `webkitdirectory`); all supported files are detected and processed automatically
+
+Both modes show a live progress bar and a **Stop** button to interrupt processing early. Results can be downloaded as CSV or Excel once complete.
+
+#### Export
+
+The **Export** button opens a modal with the following options:
+
+| Option | Description |
+|---|---|
+| **Format** | Vector: GeoJSON, GeoPackage, Shapefile (.zip), GeoParquet, CSV+WKT — Raster: GeoTIFF, NetCDF, JPEG 2000, ERDAS Imagine, ASCII Grid |
+| **Columns** | Select which columns to include (vector only) |
+| **Bands** | Select which bands to include (raster only) |
+| **Value filter** | Filter rows by column value with operators: `=`, `≠`, `<`, `≤`, `>`, `≥`, `contains` |
+| **Temporal filter** | Restrict rows to a date range on a chosen date column |
+| **Spatial filter** | Clip to a buffer zone (click on map + radius) or a hand-drawn polygon |
+
+> Note: Shapefile export automatically sanitises column names to DBF limits (10 chars, ASCII) and includes a `_field_names.csv` mapping file.
+
+#### Spatial filter (preview)
+
+A **Spatial filter** panel is available on the map: draw a buffer zone or a polygon to preview which rows fall within it before exporting.
+
+#### CRS override
+
+If the map shows data in the wrong location, use the **Reprojection** widget below the map to enter the correct EPSG code. For raster files, a dedicated `/raster_remap` endpoint re-inspects with the overridden CRS.
 
 ### 2. Python Library
 
@@ -200,6 +242,33 @@ if inspector.summary_rows:
     print(f"Rows: {summary['Nb lignes']}")
 ```
 
+### 4. Raster inspection (direct API)
+
+```python
+from geodata_inspector.raster import inspect_raster
+import geopandas as gpd
+
+gdf_reference = gpd.read_file("reference_file/fr_regions.geojson").to_crs(epsg=2154)
+
+result = inspect_raster(
+    "path/to/your/file.tif",
+    gdf_reference=gdf_reference,
+    metric_crs=2154,
+    wgs84_bounds=[-5.5, 41.0, 10.0, 51.5],
+    inferred_label="inferred",
+)
+
+summary = result["summary"]
+print(f"CRS: {summary['CRS']}")
+print(f"Bands: {summary['Nb bandes']}")
+print(f"Resolution: {summary['Résolution des cellules (m)']}")
+print(f"Area: {summary['Emprise estimée (km2)']} km²")
+
+# Per-band statistics
+for band in summary["Bandes"]["data"]:
+    print(f"  {band['Bande']}: fill={band['Remplissage (%)']}%, mean={band['Moyenne']}")
+```
+
 ## Temporal Analysis
 
 When date or timestamp columns are detected in a file, the web UI shows an interactive **Temporal analysis** section below the spatial metrics.
@@ -228,6 +297,8 @@ Filters call the `/temporal_filter` endpoint, which re-aggregates the cached fin
 
 ## Metrics Reference
 
+### Vector / Tabular metrics
+
 All spatial metrics are computed in km² regardless of source CRS.
 
 | Metric | Description |
@@ -246,6 +317,21 @@ All spatial metrics are computed in km² regardless of source CRS.
 | `Couverture territoriale (%)` | Share of the configured reference territory covered |
 | `Granularité` | Inferred spatial granularity (country-specific codes or geometry type) |
 
+### Raster metrics
+
+| Metric | Description |
+|--------|-------------|
+| `CRS` | Detected coordinate reference system (may be inferred from bounds) |
+| `Nb bandes` | Number of raster bands |
+| `Nb colonnes (pixels)` / `Nb lignes (pixels)` | Pixel dimensions |
+| `Bandes` | Per-band table: type, nodata value, min, max, mean, std, fill rate (%) |
+| `Résolution des cellules (m)` | Pixel width × height in metres |
+| `Étendue (WGS84)` | Four-corner coordinates (SW, NW, SE, NE) in WGS84 |
+| `Emprise estimée (km2)` | Bounding-box area in km² (haversine approximation) |
+| `Taux de remplissage (%)` | Mean fill rate across all bands (non-nodata pixels) |
+| `Couverture territoriale (%)` | Share of the configured reference territory covered |
+| `Variables NetCDF disponibles` | For NetCDF files: list of available data variables (skips coordinate axes) |
+
 The web UI shows a hover tooltip (ⓘ) next to each spatial metric, available in FR and EN.
 
 ## Troubleshooting
@@ -258,6 +344,10 @@ conn = duckdb.connect(':memory:')
 conn.execute("INSTALL spatial; LOAD spatial;")
 ```
 
+### Rasterio / PROJ conflict
+
+If rasterio raises a PROJ database error alongside a PostgreSQL/PostGIS installation, the app automatically sets `PROJ_DATA` and `PROJ_LIB` to the conda environment's PROJ directory at startup.
+
 ### Reference File Not Found
 
 If the reference file for the configured country is missing from `reference_file/`, coverage metrics are disabled but all other metrics still compute.
@@ -268,7 +358,11 @@ Select all components together (`.shp`, `.shx`, `.dbf`, `.prj`) in the upload pa
 
 ### CRS Detection
 
-If CRS detection fails, area calculations fall back to EPSG:3857. For French data, Lambert 93 coordinates are detected automatically as EPSG:2154.
+If CRS detection fails, area calculations fall back to EPSG:3857. For French data, Lambert 93 coordinates are detected automatically as EPSG:2154. Use the **Reprojection** widget on the map to override the detected CRS manually.
+
+### Upload Size Limit
+
+Set `max_upload_size_mb` in `web_app/config.yaml` to cap file upload size. Set to `null` (the default) for no limit.
 
 ## Contributing
 
@@ -283,6 +377,7 @@ To add support for a new country:
 - DuckDB: MIT License
 - GeoPandas: BSD License
 - Flask: BSD License
+- Rasterio: BSD License
 
 ## Credits
 

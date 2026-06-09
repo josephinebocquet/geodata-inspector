@@ -4,8 +4,9 @@ A comprehensive Python library for extracting metadata from geospatial and tabul
 
 ## Features
 
-- **Multi-format Support**: CSV, Excel (.xlsx), GeoJSON, Shapefile, GeoPackage
+- **Multi-format Support**: CSV, Excel (.xlsx), GeoJSON, Shapefile, GeoPackage (tabular/vector) — GeoTIFF, ERDAS Imagine, JPEG 2000, Arc ASCII Grid, SRTM HGT, NetCDF (raster, via `raster.py`)
 - **Automatic Geometry Detection**: Lat/lon columns, X/Y coordinates, LineString start/end pairs, WKT, GeoJSON geometries
+- **Raster Inspection**: Per-band statistics, cell resolution, WGS84 extent, thumbnail generation, NetCDF subdataset handling (`geodata_inspector.raster.inspect_raster`)
 - **Multi-country Support**: Built-in reference files and geographic key patterns for France, UK, Germany, Italy, Spain, USA, and Europe (NUTS)
 - **CRS Detection**: Automatically detects coordinate reference systems; area and density always computed in km² regardless of source CRS
 - **Bilingual**: French/English with hover tooltips explaining each metric
@@ -301,6 +302,8 @@ for r in results:
 
 ## Supported File Formats
 
+### Tabular / Vector (`MetadataExtractor`)
+
 | Format | Extensions | Notes |
 |--------|-----------|-------|
 | CSV | `.csv`, `.txt` | Auto-detects delimiter and encoding |
@@ -308,6 +311,55 @@ for r in results:
 | GeoJSON | `.geojson`, `.json` | Native geometry support |
 | Shapefile | `.shp` | Requires `.shx`, `.dbf`, `.prj` sidecar files |
 | GeoPackage | `.gpkg` | SQLite-based format |
+
+### Raster (`geodata_inspector.raster.inspect_raster`)
+
+| Format | Extensions | Notes |
+|--------|-----------|-------|
+| GeoTIFF | `.tif`, `.tiff` | Most common raster format |
+| ERDAS Imagine | `.img` | |
+| JPEG 2000 | `.jp2` | |
+| Arc ASCII Grid | `.asc` | |
+| SRTM HGT | `.hgt` | Elevation data |
+| NetCDF | `.nc` | Subdataset resolution; coordinate variables skipped automatically |
+
+## Raster Inspection API
+
+Raster files are handled by a separate module and are not processed by `MetadataExtractor`. Use `inspect_raster` directly:
+
+```python
+from geodata_inspector.raster import inspect_raster
+import geopandas as gpd
+
+gdf_reference = gpd.read_file("reference_file/fr_regions.geojson").to_crs(epsg=2154)
+
+result = inspect_raster(
+    "path/to/file.tif",
+    gdf_reference=gdf_reference,
+    metric_crs=2154,
+    wgs84_bounds=[-5.5, 41.0, 10.0, 51.5],
+    inferred_label="inferred",   # label appended when CRS is inferred
+    crs_override=None,           # integer EPSG to force a specific CRS
+)
+
+summary = result["summary"]   # dict with all raster metrics
+map_data = result["map"]      # {type, bounds, thumbnail (base64 PNG)}
+
+print(f"CRS:        {summary['CRS']}")
+print(f"Bands:      {summary['Nb bandes']}")
+print(f"Dimensions: {summary['Nb colonnes (pixels)']} × {summary['Nb lignes (pixels)']} px")
+print(f"Resolution: {summary['Résolution des cellules (m)']}")
+print(f"Area:       {summary['Emprise estimée (km2)']} km²")
+print(f"Fill rate:  {summary['Taux de remplissage (%)']}%")
+
+for band in summary["Bandes"]["data"]:
+    print(f"  {band['Bande']}: min={band['Min']}, max={band['Max']}, "
+          f"mean={band['Moyenne']}, fill={band['Remplissage (%)']}%")
+
+# NetCDF files list available data variables
+if "Variables NetCDF disponibles" in summary:
+    print(f"NetCDF vars: {summary['Variables NetCDF disponibles']}")
+```
 
 ## CRS Handling
 
