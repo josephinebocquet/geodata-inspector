@@ -1,0 +1,10 @@
+.git
+.gitignore
+*.patch
+*.pyc
+__pycache__/
+*.egg-info/
+.env
+*.md
+examples/
+geodata_changes.patch

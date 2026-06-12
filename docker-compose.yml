@@ -1,16 +1,16 @@
-
 services:
   geodata-inspector:
     build: .
     ports:
       - "5050:5050"
     volumes:
-      - geodata_uploads:/tmp/geodata_uploads
-      - ./web_app/config.yaml:/app/web_app/config.yaml
+      - geodata_preview:/data/geodata_preview
+      - ./web_app/config.yaml:/app/web_app/config.yaml:ro
     environment:
       - PYTHONUNBUFFERED=1
-      - HOST=0.0.0.0
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - GEODATA_PREVIEW_DIR=/data/geodata_preview
     restart: unless-stopped
 
 volumes:
-  geodata_uploads:
+  geodata_preview:
